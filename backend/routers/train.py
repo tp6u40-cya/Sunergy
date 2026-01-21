@@ -61,6 +61,23 @@ def _load_cleaned_or_json(entry: SiteData) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
+def _to_native(obj):
+    try:
+        import numpy as _np  # local import to avoid hard dep in type hints
+    except Exception:  # pragma: no cover
+        _np = None
+    if isinstance(obj, dict):
+        return {k: _to_native(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_native(v) for v in obj]
+    # numpy scalar -> built-in
+    if _np is not None and isinstance(obj, (_np.integer,)):
+        return int(obj)
+    if _np is not None and isinstance(obj, (_np.floating,)):
+        return float(obj)
+    return obj
+
+
 @router.get("/info")
 def train_info(data_id: int, db: Session = Depends(get_db)):
     entry = db.query(SiteData).filter(SiteData.data_id == data_id).first()
@@ -160,7 +177,10 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
 
     # basic feature selection
     feature_cols = [c for c in df.columns if c != payload.target]
-    X = df[feature_cols].select_dtypes(include=[np.number]).fillna(0.0).values
+    num_df = df[feature_cols].select_dtypes(include=[np.number]).fillna(0.0)
+    if num_df.shape[1] == 0:
+        raise HTTPException(status_code=400, detail="no numeric features found for training; ensure cleaned data has numeric columns besides target")
+    X = num_df.values
     y = df[payload.target].astype(float).values
 
     if len(y) < 10:
@@ -172,21 +192,30 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
     results: Dict[str, Any] = {}
     for m in payload.models:
         spec = (payload.params or {}).get(m, {})
-        res = _train_single_model(m, X_train, y_train, X_test, y_test, payload.strategy, spec)
-        best = res.get("best") or {}
-        results[m] = {
-            "id": m,
-            "status": "ok" if best else "failed",
-            "r2": round(best.get("r2", 0.0), 3),
-            "rmse": round(best.get("rmse", 0.0), 3),
-            "mae": round(best.get("mae", 0.0), 3),
-            "wmape": round(best.get("wmape", 0.0), 4),
-            "best_params": best.get("params", {}),
-        }
+        try:
+            res = _train_single_model(m, X_train, y_train, X_test, y_test, payload.strategy, spec)
+            best = res.get("best") or {}
+            results[m] = {
+                "id": m,
+                "status": "ok" if best else "failed",
+                "r2": round(best.get("r2", 0.0), 3),
+                "rmse": round(best.get("rmse", 0.0), 3),
+                "mae": round(best.get("mae", 0.0), 3),
+                "wmape": round(best.get("wmape", 0.0), 4),
+                "best_params": best.get("params", {}),
+            }
+        except HTTPException as e:
+            results[m] = {
+                "id": m,
+                "status": "error",
+                "error": e.detail if hasattr(e, 'detail') else str(e),
+            }
+        except Exception as e:
+            results[m] = {"id": m, "status": "error", "error": str(e)}
 
     # attach metadata for which file used
     cleaned_path = (entry.processed_meta or {}).get("cleaned_path") if entry.processed_meta else None
-    return {
+    return _to_native({
         "data_id": payload.data_id,
         "cleaned_file": cleaned_path,
         "split": {
@@ -194,4 +223,4 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
             "test": 1.0 - float(payload.split_ratio),
         },
         "results": results,
-    }
+    })
