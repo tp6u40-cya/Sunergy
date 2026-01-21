@@ -1,0 +1,125 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+/* 新登入後首頁的CSS */
+
+/* Custom Utilities for text stroke (for line art effect) */
+.text-stroke {
+  -webkit-text-stroke-width: var(--text-stroke-width, 0);
+  -webkit-text-stroke-color: var(--text-stroke-color, currentColor);
+}
+
+.text-stroke-1 { --text-stroke-width: 1px; }
+.text-stroke-2 { --text-stroke-width: 2px; }
+.text-stroke-3 { --text-stroke-width: 3px; }
+
+/* Custom Keyframe Animations */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes bounceOnce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  20% {
+    transform: translateY(-8px);
+  }
+  40% {
+    transform: translateY(0);
+  }
+  60% {
+    transform: translateY(-4px);
+  }
+  80% {
+    transform: translateY(0);
+  }
+}
+
+@keyframes bounceHorizontal {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(4px);
+  }
+  40% {
+    transform: translateX(0);
+  }
+}
+
+/* Custom Animation Classes */
+.animate-fade-in-up {
+  animation: fadeInUp 1s ease-out forwards;
+}
+
+/* 將原本的 animate-bounce 覆蓋成只彈跳一次的版本，或用新名字 */
+.animate-bounce-once {
+  animation: bounceOnce 1s ease-out forwards;
+}
+
+.animate-bounce-horizontal {
+  animation: bounceHorizontal 1.5s ease-in-out infinite; /* 無限循環 */
+}
+
+/* Tailwind 內建的 pulse 動畫已經夠用，不用額外定義 */
+/* @keyframes pulse { ... } */
+/* .animate-pulse { ... } */
+
+/*
+  如果你在 PublicHome.js 中使用了 animate-fade-in，
+  這裡也需要定義 keyframes
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  .animate-fade-in { animation: fadeIn 0.5s ease-out forwards; }
+*/
+
+/* 在 src/index.css 加入 */
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-up {
+  animation: slideUp 0.6s ease-out forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.5s ease-out forwards;
+}
