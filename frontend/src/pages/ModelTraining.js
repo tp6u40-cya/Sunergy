@@ -1,5 +1,5 @@
 // src/pages/ModelTraining.js
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Navbar from '../components/Navbar';
 
 // --- 輔助組件：警示燈 ---
@@ -87,21 +87,52 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
   const [isTraining, setIsTraining] = useState(false);
   const [isTrained, setIsTrained] = useState(false);
   const [trainingResults, setTrainingResults] = useState({});
+  const [strategy, setStrategy] = useState('grid');
+  const [cleanedFileName, setCleanedFileName] = useState('');
 
   const toggleModel = (id) => setSelectedModels(prev => prev.includes(id) ? prev.filter(m => m !== id) : [...prev, id]);
 
-  const handleStartTraining = () => {
+  // 載入目前清洗檔案資訊
+  React.useEffect(() => {
+    const dataId = localStorage.getItem('lastDataId');
+    if (!dataId) return;
+    fetch(`http://127.0.0.1:8000/train/info?data_id=${dataId}`)
+      .then(r => r.json())
+      .then(j => { if (j && j.cleaned_file) setCleanedFileName(j.cleaned_file); })
+      .catch(() => {});
+  }, []);
+
+  const handleStartTraining = async () => {
     if (selectedModels.length === 0) return alert('請選擇模型');
+    const dataId = localStorage.getItem('lastDataId');
+    if (!dataId) return alert('找不到清洗後的資料來源');
+
+    const params = {};
+    if (selectedModels.includes('XGBoost')) params['XGBoost'] = { n_estimators: { start: paramIntervals.XGB_trees_s, end: paramIntervals.XGB_trees_e, step: 50 } };
+    if (selectedModels.includes('RandomForest')) params['RandomForest'] = { n_estimators: { start: paramIntervals.RF_trees_s, end: paramIntervals.RF_trees_e, step: 50 } };
+    if (selectedModels.includes('SVR')) {
+      const step = Math.max(1, Math.floor((paramIntervals.SVR_c_e - paramIntervals.SVR_c_s) / 5) || 1);
+      params['SVR'] = { C: { start: paramIntervals.SVR_c_s, end: paramIntervals.SVR_c_e, step } };
+    }
+    if (selectedModels.includes('LSTM')) params['LSTM'] = { n_estimators: { start: paramIntervals.LSTM_epochs_s, end: paramIntervals.LSTM_epochs_e, step: 50 } };
+
     setIsTraining(true);
-    setTimeout(() => {
-      const mock = selectedModels.reduce((acc, id) => {
-        acc[id] = { id, r2: (0.91 + Math.random() * 0.07).toFixed(3), rmse: (0.1 + Math.random() * 1.4).toFixed(2), mae: (0.1 + Math.random() * 0.9).toFixed(2), wmape: (Math.random() * 0.18).toFixed(4) };
-        return acc;
-      }, {});
-      setTrainingResults(mock);
-      setIsTraining(false);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/train/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data_id: Number(dataId), split_ratio: Number(splitRatio)/100, models: selectedModels, strategy, params })
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.detail || '訓練失敗');
+      setTrainingResults(json.results || {});
       setIsTrained(true);
-    }, 2000);
+      if (json.cleaned_file) setCleanedFileName(json.cleaned_file);
+    } catch (e) {
+      alert(e.message || '訓練失敗');
+    } finally {
+      setIsTraining(false);
+    }
   };
 
   return (
@@ -142,6 +173,11 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
             <input type="range" min="50" max="95" step="5" value={splitRatio} onChange={(e) => setSplitRatio(e.target.value)} className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-primary" />
           </section>
 
+          {/* Info: 目前處理檔案 */}
+          <section class=\"bg-white/[0.02] p-5 rounded-2xl border border-white/5\">
+            <h2 class=\"text-sm font-bold text-primary mb-2\">目前處理檔案</h2>
+            <p class=\"text-xs text-white/70 break-all\">{cleanedFileName || '—'}</p>
+          </section>
           {/* Step 2: 選擇模型 */}
           <section className="bg-white/[0.02] p-5 rounded-2xl border border-white/5">
             <h2 className="text-sm font-bold text-primary mb-4 flex items-center gap-2">
@@ -158,7 +194,16 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
           <section className="bg-white/[0.02] p-5 rounded-2xl border border-white/5">
             <h2 className="text-sm font-bold text-primary mb-4 flex items-center gap-2">
               <span className="size-5 rounded-full bg-primary text-background-dark flex items-center justify-center text-[10px]">3</span> 調整參數
-            </h2>
+            </h2>            {/* 策略選擇 */}
+            <div className=\"mb-4 flex items-center gap-2 text-[10px]\">
+              <span className=\"text-white/50\">策略選擇</span>
+              {['manual','grid','bayes'].map(sg => (
+                <label key={sg} className={\px-2 py-1 rounded border cursor-pointer \\}>
+                  <input type=\"radio\" name=\"strategy\" value={sg} checked={strategy===sg} onChange={()=>setStrategy(sg)} className=\"hidden\" />
+                  {sg.toUpperCase()}
+                </label>
+              ))}
+            </div>
             <div className="flex flex-col gap-4">
               {selectedModels.map(id => (
                 <div key={id} className="p-4 bg-black/20 rounded-xl border border-white/5">
