@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 from database import get_db
 from models import SiteData
@@ -19,6 +19,9 @@ try:
     from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
     from sklearn.svm import SVR as SKSVR
     from sklearn.ensemble import RandomForestRegressor
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import Pipeline
+    from sklearn.linear_model import LinearRegression
     HAS_SKLEARN = True
 except Exception:
     HAS_SKLEARN = False
@@ -40,6 +43,12 @@ def _uploads_base_dir() -> Path:
 
 def _cleaned_dir() -> Path:
     p = _uploads_base_dir() / "cleaned"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _models_dir(data_id: int) -> Path:
+    p = _uploads_base_dir() / "models" / str(data_id)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -115,11 +124,24 @@ def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strateg
 
     # build candidate param grid
     def build_grid(spec: Dict[str, Any]):
+        def _make_range(start, end, step):
+            # choose int or float grid based on inputs
+            def _is_intlike(x):
+                try:
+                    return float(x).is_integer()
+                except Exception:
+                    return isinstance(x, int)
+            is_int_grid = _is_intlike(start) and _is_intlike(end) and _is_intlike(step)
+            arr = np.arange(float(start), float(end) + (float(step) or 1.0), float(step))
+            if is_int_grid:
+                return [int(round(x)) for x in arr]
+            return [float(np.round(x, 6)) for x in arr]
+
         grid = {}
         for k, v in (spec or {}).items():
             if isinstance(v, dict) and {"start", "end", "step"}.issubset(v.keys()):
-                start, end, step = v["start"], v["end"], max(v.get("step", 1), 1)
-                grid[k] = list(np.arange(start, end + (step or 1), step).astype(int))
+                start, end, step = v.get("start"), v.get("end"), v.get("step", 1)
+                grid[k] = _make_range(start, end, step)
             elif isinstance(v, dict) and {"values"}.issubset(v.keys()):
                 grid[k] = list(v["values"])  # explicit list
             else:
@@ -140,7 +162,11 @@ def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strateg
             C = float(params.get("C", 1.0))
             kernel = params.get("kernel", "rbf")
             gamma = params.get("gamma", "scale")
-            model = SKSVR(C=C, kernel=kernel, gamma=gamma)
+            # use scaling during training to be consistent with persistence
+            model = Pipeline([
+                ("scaler", StandardScaler()),
+                ("svr", SKSVR(C=C, kernel=kernel, gamma=gamma)),
+            ])
         elif model_id == "RandomForest":
             n_estimators = int(params.get("n_estimators", 200))
             max_depth = params.get("max_depth", None)
@@ -165,6 +191,35 @@ def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strateg
     return {"best": best, "trials": tried}
 
 
+def _ensure_time_features(df: pd.DataFrame, time_col: Optional[str]) -> pd.DataFrame:
+    # derive basic time features if a time column is available
+    if time_col and time_col in df.columns:
+        s = pd.to_datetime(df[time_col], errors="coerce")
+        df = df.copy()
+        df['hour'] = s.dt.hour
+        df['dayofweek'] = s.dt.dayofweek
+        df['month'] = s.dt.month
+        # cyclical hour
+        df['hour_sin'] = np.sin(2 * np.pi * (df['hour'].fillna(0) / 24))
+        df['hour_cos'] = np.cos(2 * np.pi * (df['hour'].fillna(0) / 24))
+    return df
+
+
+def _validate_clean_data(df: pd.DataFrame, gi_col: str, tm_col: str, target_col: str):
+    missing_cols = [c for c in [gi_col, tm_col, target_col] if c not in df.columns]
+    if missing_cols:
+        raise HTTPException(status_code=400, detail=f"missing required column(s): {','.join(missing_cols)}")
+
+    # Ensure convertible to float and no NaNs (since data is claimed cleaned)
+    for c in [gi_col, tm_col, target_col]:
+        try:
+            df[c].astype(float)
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"column '{c}' cannot be parsed as float")
+        if pd.isna(df[c]).any():
+            raise HTTPException(status_code=400, detail=f"column '{c}' has NaN but data should be cleaned")
+
+
 @router.post("/run")
 def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
     entry = db.query(SiteData).filter(SiteData.data_id == payload.data_id).first()
@@ -172,24 +227,62 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="data_id not found")
 
     df = _load_cleaned_or_json(entry)
-    if payload.target not in df.columns:
+    target_col = payload.target or 'EAC'
+    if target_col not in df.columns:
         raise HTTPException(status_code=400, detail=f"target column '{payload.target}' not found")
 
-    # basic feature selection
-    feature_cols = [c for c in df.columns if c != payload.target]
-    num_df = df[feature_cols].select_dtypes(include=[np.number]).fillna(0.0)
+    # enforce default features GI + TM
+    features: List[str] = payload.features or ['GI','TM']
+    missing = [c for c in ['GI','TM'] if c not in df.columns]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"required feature(s) missing: {','.join(missing)}")
+
+    # Lightweight validation only (no interpolation/cleaning here)
+    _validate_clean_data(df, gi_col='GI', tm_col='TM', target_col=target_col)
+
+    # time features & strict time sorting on df level
+    time_col = payload.time_col
+    if time_col is None:
+        # try to auto detect a time column used earlier in visualize
+        for cand in ['timestamp','datetime','time','recordtime','thedate','Date','Time']:
+            if cand in df.columns:
+                time_col = cand
+                break
+    if time_col and time_col in df.columns:
+        # parse, drop NaT, sort, then derive time features
+        parsed = pd.to_datetime(df[time_col], errors='coerce')
+        df = df.loc[parsed.notna()].copy()
+        df[time_col] = parsed[parsed.notna()]
+        df = df.sort_values(time_col).reset_index(drop=True)
+        df = _ensure_time_features(df, time_col)
+
+    # build design matrix
+    extra_time_feats = [c for c in ['hour','dayofweek','month','hour_sin','hour_cos'] if c in df.columns]
+    feature_cols = features + [c for c in extra_time_feats if c not in features]
+    num_df = df[feature_cols].select_dtypes(include=[np.number])
+    if num_df.isna().any().any():
+        raise HTTPException(status_code=400, detail="numeric features contain NaN; cleaned data should not have missing values in features")
     if num_df.shape[1] == 0:
-        raise HTTPException(status_code=400, detail="no numeric features found for training; ensure cleaned data has numeric columns besides target")
+        raise HTTPException(status_code=400, detail="no numeric features after preprocessing; ensure GI/TM exist and are numeric")
     X = num_df.values
-    y = df[payload.target].astype(float).values
+    y = df[target_col].astype(float).values
 
     if len(y) < 10:
         raise HTTPException(status_code=400, detail="not enough rows to train")
 
-    test_size = max(0.05, min(0.5, 1.0 - float(payload.split_ratio)))
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+    # time-based split or random split (df already sorted if time_col given)
+
+    if payload.split_method == 'time' and len(y) > 10:
+        test_size = max(0.05, min(0.5, 1.0 - float(payload.split_ratio)))
+        n_test = max(1, int(len(y) * test_size))
+        X_train, X_test = X[:-n_test], X[-n_test:]
+        y_train, y_test = y[:-n_test], y[-n_test:]
+    else:
+        test_size = max(0.05, min(0.5, 1.0 - float(payload.split_ratio)))
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
 
     results: Dict[str, Any] = {}
+
     for m in payload.models:
         spec = (payload.params or {}).get(m, {})
         try:
@@ -215,6 +308,82 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
 
     # attach metadata for which file used
     cleaned_path = (entry.processed_meta or {}).get("cleaned_path") if entry.processed_meta else None
+
+    # Optional artifact saving
+    if payload.save_model and HAS_SKLEARN:
+        import json as _json
+        from datetime import datetime as _dt
+        import joblib as _joblib
+        saved = []
+        timestamp = _dt.utcnow().strftime('%Y%m%d_%H%M%S%f')
+        models_dir = _models_dir(payload.data_id)
+        for mid, res in results.items():
+            if res.get('status') != 'ok':
+                continue
+            try:
+                if mid == 'XGBoost' and HAS_XGBOOST:
+                    # retrain best param briefly to persist
+                    spec = (payload.params or {}).get(mid, {})
+                    n_estimators = int(res.get('best_params', {}).get('n_estimators', 300))
+                    learning_rate = float(res.get('best_params', {}).get('learning_rate', 0.1))
+                    max_depth = int(res.get('best_params', {}).get('max_depth', 6))
+                    model = xgb.XGBRegressor(n_estimators=n_estimators, learning_rate=learning_rate, max_depth=max_depth, subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=-1, tree_method='hist')
+                    model.fit(X_train, y_train)
+                    path = models_dir / f"{timestamp}_{mid}.json"
+                    model.save_model(str(path))
+                else:
+                    # retrain a simple model using best params (RF/SVR)
+                    if mid == 'RandomForest':
+                        n_estimators = int(res.get('best_params', {}).get('n_estimators', 200))
+                        max_depth = res.get('best_params', {}).get('max_depth', None)
+                        model = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth if max_depth is not None else None, random_state=42, n_jobs=-1)
+                    elif mid == 'SVR':
+                        C = float(res.get('best_params', {}).get('C', 1.0))
+                        model = Pipeline([('scaler', StandardScaler()), ('svr', SKSVR(C=C, kernel='rbf', gamma='scale'))])
+                    else:
+                        continue
+                    model.fit(X_train, y_train)
+                    path = models_dir / f"{timestamp}_{mid}.joblib"
+                    _joblib.dump(model, path)
+                # write sidecar metadata to lock feature order & config
+                meta_path = models_dir / f"{timestamp}_{mid}.meta.json"
+                sidecar = {
+                    'model_id': mid,
+                    'artifact': str(path.name),
+                    'feature_cols_used': feature_cols,
+                    'target': target_col,
+                    'time_col': time_col,
+                    'split_method': payload.split_method,
+                    'trained_at': timestamp,
+                }
+                with open(meta_path, 'w', encoding='utf-8') as fh:
+                    _json.dump(sidecar, fh, ensure_ascii=False, indent=2)
+                saved.append({'model_id': mid, 'artifact': str(path.name), 'meta': meta_path.name})
+            except Exception:
+                continue
+        # persist simple registry into processed_meta
+        meta = entry.processed_meta or {}
+        history = meta.get('trained_models', [])
+        history.append({
+            'trained_at': timestamp,
+            'data_id': payload.data_id,
+            'target': target_col,
+            'features': feature_cols,
+            'split_method': payload.split_method,
+            'artifacts': saved,
+            'cleaned_file': cleaned_path,
+        })
+        meta['trained_models'] = history
+        entry.processed_meta = meta
+        db.add(entry)
+        db.commit()
+
+    warnings = []
+    if payload.strategy == 'bayes':
+        warnings.append("strategy=bayes behaves like grid (placeholder)")
+    if any(m == 'LSTM' for m in payload.models):
+        warnings.append("LSTM is not implemented; consider removing or implementing sequence model")
+
     return _to_native({
         "data_id": payload.data_id,
         "cleaned_file": cleaned_path,
@@ -222,5 +391,9 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
             "train": float(payload.split_ratio),
             "test": 1.0 - float(payload.split_ratio),
         },
+        "n_train": int(len(y_train)),
+        "n_test": int(len(y_test)),
+        "feature_cols_used": feature_cols,
         "results": results,
+        "warnings": warnings,
     })
