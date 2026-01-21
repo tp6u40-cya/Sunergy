@@ -76,12 +76,20 @@ const IntervalSlider = ({ label, min, max, start, end, onStartChange, onEndChang
 
 export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onLogout, onNavigateToSites }) {
   const [splitRatio, setSplitRatio] = useState(80);
-  const [selectedModels, setSelectedModels] = useState(['LSTM']);
+  const [selectedModels, setSelectedModels] = useState(['XGBoost']);
   const [paramIntervals, setParamIntervals] = useState({
-    LSTM_epochs_s: 50, LSTM_epochs_e: 200,
+    // LSTM
+    LSTM_epochs_s: 10, LSTM_epochs_e: 60,
+    LSTM_lookback_s: 12, LSTM_lookback_e: 72,
+    LSTM_hidden_s: 32, LSTM_hidden_e: 128,
+    // XGBoost
     XGB_trees_s: 100, XGB_trees_e: 500,
+    XGB_depth_s: 3, XGB_depth_e: 10,
+    // SVR
     SVR_c_s: 1, SVR_c_e: 50,
-    RF_trees_s: 50, RF_trees_e: 300
+    // RandomForest
+    RF_trees_s: 50, RF_trees_e: 300,
+    RF_depth_s: 3, RF_depth_e: 12,
   });
   const [activeChartLines, setActiveChartLines] = useState({ LSTM: true, XGBoost: true, SVR: true, RandomForest: true });
   const [isTraining, setIsTraining] = useState(false);
@@ -108,13 +116,28 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
     if (!dataId) return alert('找不到清洗後的資料來源');
 
     const params = {};
-    if (selectedModels.includes('XGBoost')) params['XGBoost'] = { n_estimators: { start: paramIntervals.XGB_trees_s, end: paramIntervals.XGB_trees_e, step: 50 } };
-    if (selectedModels.includes('RandomForest')) params['RandomForest'] = { n_estimators: { start: paramIntervals.RF_trees_s, end: paramIntervals.RF_trees_e, step: 50 } };
-    if (selectedModels.includes('SVR')) {
-      const step = Math.max(1, Math.floor((paramIntervals.SVR_c_e - paramIntervals.SVR_c_s) / 5) || 1);
-      params['SVR'] = { C: { start: paramIntervals.SVR_c_s, end: paramIntervals.SVR_c_e, step } };
+    if (strategy === 'manual') {
+      if (selectedModels.includes('XGBoost')) params['XGBoost'] = { n_estimators: Number(paramIntervals.XGB_trees_e), max_depth: Number(paramIntervals.XGB_depth_e), learning_rate: 0.1 };
+      if (selectedModels.includes('RandomForest')) params['RandomForest'] = { n_estimators: Number(paramIntervals.RF_trees_e), max_depth: Number(paramIntervals.RF_depth_e) };
+    } else {
+      if (selectedModels.includes('XGBoost')) params['XGBoost'] = { n_estimators: { start: paramIntervals.XGB_trees_s, end: paramIntervals.XGB_trees_e, step: 100 }, max_depth: { start: paramIntervals.XGB_depth_s, end: paramIntervals.XGB_depth_e, step: 1 }, learning_rate: { start: 0.01, end: 0.3, step: 0.05 } };
+      if (selectedModels.includes('RandomForest')) params['RandomForest'] = { n_estimators: { start: paramIntervals.RF_trees_s, end: paramIntervals.RF_trees_e, step: 50 }, max_depth: { start: paramIntervals.RF_depth_s, end: paramIntervals.RF_depth_e, step: 1 } };
     }
-    if (selectedModels.includes('LSTM')) params['LSTM'] = { n_estimators: { start: paramIntervals.LSTM_epochs_s, end: paramIntervals.LSTM_epochs_e, step: 50 } };
+    if (selectedModels.includes('SVR')) {
+      if (strategy === 'manual') {
+        params['SVR'] = { C: Number(paramIntervals.SVR_c_e) };
+      } else {
+        const step = Math.max(1, Math.floor((paramIntervals.SVR_c_e - paramIntervals.SVR_c_s) / 5) || 1);
+        params['SVR'] = { C: { start: paramIntervals.SVR_c_s, end: paramIntervals.SVR_c_e, step } };
+      }
+    }
+    if (selectedModels.includes('LSTM')) {
+      if (strategy === 'manual') {
+        params['LSTM'] = { epochs: Number(paramIntervals.LSTM_epochs_e), lookback: Number(paramIntervals.LSTM_lookback_e), hidden_size: Number(paramIntervals.LSTM_hidden_e) };
+      } else {
+        params['LSTM'] = { lookback: { start: paramIntervals.LSTM_lookback_s, end: paramIntervals.LSTM_lookback_e, step: 12 }, hidden_size: { start: paramIntervals.LSTM_hidden_s, end: paramIntervals.LSTM_hidden_e, step: 32 }, epochs: { start: paramIntervals.LSTM_epochs_s, end: paramIntervals.LSTM_epochs_e, step: 10 } };
+      }
+    }
 
     setIsTraining(true);
     try {

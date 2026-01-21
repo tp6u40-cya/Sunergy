@@ -36,3 +36,13 @@ class TrainRequest(BaseModel):
     split_method: Literal['time','random'] = 'time'
     save_model: bool = True
     model_name: Optional[str] = None
+
+
+class PredictRequest(BaseModel):
+    data_id: int
+    # choose artifact by exact filename, or by (model_id + trained_at)
+    artifact: Optional[str] = None
+    model_id: Optional[str] = None
+    trained_at: Optional[str] = None
+    # optional ad-hoc rows to predict on; if omitted, will use cleaned data
+    rows: Optional[List[Dict[str, Any]]] = None

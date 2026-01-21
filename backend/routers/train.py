@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional
 
 from database import get_db
 from models import SiteData
-from schemas import TrainRequest
+from schemas import TrainRequest, PredictRequest
 
 # Optional imports for models (detect per-library)
 HAS_SKLEARN = False
@@ -69,6 +69,21 @@ def _models_dir(data_id: int) -> Path:
     return p
 
 
+def _list_artifacts(data_id: int):
+    d = _models_dir(data_id)
+    items = []
+    for p in sorted(d.glob("*")):
+        if p.suffix in {".joblib", ".json"}:
+            meta = p.with_suffix(".meta.json")
+            items.append({
+                "artifact": p.name,
+                "meta": meta.name if meta.exists() else None,
+                "size": p.stat().st_size,
+                "mtime": datetime.fromtimestamp(p.stat().st_mtime).isoformat(),
+            })
+    return items
+
+
 def _load_cleaned_or_json(entry: SiteData) -> pd.DataFrame:
     # prefer cleaned csv if exists
     rel = (entry.processed_meta or {}).get("cleaned_path") if entry.processed_meta else None
@@ -115,6 +130,11 @@ def train_info(data_id: int, db: Session = Depends(get_db)):
         "has_processed_json": bool(entry.processed_json),
         "rows": len(entry.processed_json or entry.json_data or []),
     }
+
+
+@router.get("/models")
+def list_models(data_id: int):
+    return {"data_id": data_id, "artifacts": _list_artifacts(data_id)}
 
 
 def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strategy: str, param_spec: Dict[str, Any]):
@@ -596,4 +616,74 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
         "feature_cols_used": feature_cols,
         "results": results,
         "warnings": warnings,
+    })
+
+
+@router.post("/predict")
+def predict(payload: PredictRequest, db: Session = Depends(get_db)):
+    entry = db.query(SiteData).filter(SiteData.data_id == payload.data_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="data_id not found")
+
+    # locate artifact
+    models_dir = _models_dir(payload.data_id)
+    artifact_path: Optional[Path] = None
+    meta_path: Optional[Path] = None
+    if payload.artifact:
+        artifact_path = models_dir / payload.artifact
+        if not artifact_path.exists():
+            raise HTTPException(status_code=404, detail="artifact not found")
+        if artifact_path.suffix in {".joblib", ".json"}:
+            meta_path = artifact_path.with_suffix(".meta.json")
+    else:
+        # find by model_id + trained_at
+        if not (payload.model_id and payload.trained_at):
+            raise HTTPException(status_code=400, detail="provide artifact filename or (model_id + trained_at)")
+        candidates = list(models_dir.glob(f"{payload.trained_at}_{payload.model_id}.*"))
+        if not candidates:
+            raise HTTPException(status_code=404, detail="artifact by model_id+trained_at not found")
+        artifact_path = candidates[0]
+        meta_path = artifact_path.with_suffix(".meta.json")
+
+    # load metadata
+    if not meta_path or not meta_path.exists():
+        raise HTTPException(status_code=400, detail="missing meta sidecar for artifact")
+    import json as _json
+    with open(meta_path, "r", encoding="utf-8") as fh:
+        meta = _json.load(fh)
+    feature_cols = meta.get("feature_cols_used") or []
+    target_col = meta.get("target") or "EAC"
+
+    # build dataframe
+    if payload.rows:
+        df = pd.DataFrame(payload.rows)
+    else:
+        df = _load_cleaned_or_json(entry)
+    missing = [c for c in feature_cols if c not in df.columns]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"missing feature columns: {','.join(missing)}")
+    X = df[feature_cols].select_dtypes(include=[np.number]).values
+
+    # dispatch by artifact type
+    if artifact_path.suffix == ".json":
+        if not HAS_XGBOOST:
+            raise HTTPException(status_code=500, detail="xgboost not available to load json model")
+        booster = xgb.XGBRegressor()
+        booster.load_model(str(artifact_path))
+        y_pred = booster.predict(X)
+    else:
+        # joblib models (RF/SVR or XGB fallback)
+        if not HAS_SKLEARN and artifact_path.suffix == ".joblib":
+            # Might still be XGB via joblib, try loading anyway
+            pass
+        import joblib as _joblib
+        model = _joblib.load(artifact_path)
+        # If it's an SVR pipeline, it handles scaling internally
+        y_pred = model.predict(X)
+
+    return _to_native({
+        "artifact": artifact_path.name,
+        "n": int(len(y_pred)),
+        "target": target_col,
+        "pred": y_pred.tolist(),
     })
