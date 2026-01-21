@@ -10,16 +10,24 @@ from database import get_db
 from models import SiteData
 from schemas import TrainRequest
 
-# Optional imports for models
+# Optional imports for models (detect per-library)
+HAS_SKLEARN = False
+HAS_XGBOOST = False
+
 try:
     from sklearn.model_selection import train_test_split, ParameterGrid
     from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
     from sklearn.svm import SVR as SKSVR
     from sklearn.ensemble import RandomForestRegressor
-    import xgboost as xgb
     HAS_SKLEARN = True
 except Exception:
     HAS_SKLEARN = False
+
+try:
+    import xgboost as xgb
+    HAS_XGBOOST = True
+except Exception:
+    HAS_XGBOOST = False
 
 router = APIRouter(prefix="/train", tags=["Train"])
 
@@ -68,8 +76,11 @@ def train_info(data_id: int, db: Session = Depends(get_db)):
 
 
 def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strategy: str, param_spec: Dict[str, Any]):
-    if not HAS_SKLEARN:
-        raise HTTPException(status_code=500, detail="scikit-learn/xgboost not available on server")
+    # Dependency checks per model
+    if model_id in ("SVR", "RandomForest", "LSTM") and not HAS_SKLEARN:
+        raise HTTPException(status_code=500, detail="scikit-learn not available on server")
+    if model_id == "XGBoost" and not HAS_XGBOOST:
+        raise HTTPException(status_code=500, detail="xgboost not available on server")
 
     best = None
     tried = []
