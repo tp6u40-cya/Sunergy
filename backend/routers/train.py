@@ -172,10 +172,19 @@ def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strateg
             max_depth = params.get("max_depth", None)
             model = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth, random_state=42, n_jobs=-1)
         elif model_id == "XGBoost":
-            n_estimators = int(params.get("n_estimators", 300))
-            learning_rate = float(params.get("learning_rate", 0.1))
-            max_depth = int(params.get("max_depth", 6))
-            model = xgb.XGBRegressor(n_estimators=n_estimators, learning_rate=learning_rate, max_depth=max_depth, subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=-1, tree_method="hist")
+            xgb_kwargs = {
+                'n_estimators': int(params.get('n_estimators', 300)),
+                'learning_rate': float(params.get('learning_rate', 0.1)),
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'random_state': 42,
+                'n_jobs': -1,
+                'tree_method': 'hist',
+            }
+            md = params.get('max_depth', 6)
+            if md is not None and md != '' and md != 'None':
+                xgb_kwargs['max_depth'] = int(md)
+            model = xgb.XGBRegressor(**xgb_kwargs)
         elif model_id == "LSTM":
             # Placeholder: map to RandomForest for now; real LSTM would require PyTorch/TF
             n_estimators = int(params.get("n_estimators", 200))
@@ -309,12 +318,13 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
     # attach metadata for which file used
     cleaned_path = (entry.processed_meta or {}).get("cleaned_path") if entry.processed_meta else None
 
-    # Optional artifact saving
-    if payload.save_model and HAS_SKLEARN:
+    # Optional artifact saving (do not require sklearn globally, as XGBoost can save without it)
+    if payload.save_model:
         import json as _json
         from datetime import datetime as _dt
         import joblib as _joblib
         saved = []
+        save_errors = []
         timestamp = _dt.utcnow().strftime('%Y%m%d_%H%M%S%f')
         models_dir = _models_dir(payload.data_id)
         for mid, res in results.items():
@@ -322,15 +332,30 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
                 continue
             try:
                 if mid == 'XGBoost' and HAS_XGBOOST:
-                    # retrain best param briefly to persist
-                    spec = (payload.params or {}).get(mid, {})
-                    n_estimators = int(res.get('best_params', {}).get('n_estimators', 300))
-                    learning_rate = float(res.get('best_params', {}).get('learning_rate', 0.1))
-                    max_depth = int(res.get('best_params', {}).get('max_depth', 6))
-                    model = xgb.XGBRegressor(n_estimators=n_estimators, learning_rate=learning_rate, max_depth=max_depth, subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=-1, tree_method='hist')
+                    # retrain best param briefly to persist (handle optional/None params robustly)
+                    best_params = res.get('best_params', {}) or {}
+                    xgb_kwargs = {
+                        'n_estimators': int(best_params.get('n_estimators', 300)),
+                        'learning_rate': float(best_params.get('learning_rate', 0.1)),
+                        'subsample': 0.8,
+                        'colsample_bytree': 0.8,
+                        'random_state': 42,
+                        'n_jobs': -1,
+                        'tree_method': 'hist',
+                    }
+                    md = best_params.get('max_depth', 6)
+                    if md is not None and md != '' and md != 'None':
+                        xgb_kwargs['max_depth'] = int(md)
+                    model = xgb.XGBRegressor(**xgb_kwargs)
                     model.fit(X_train, y_train)
-                    path = models_dir / f"{timestamp}_{mid}.json"
-                    model.save_model(str(path))
+                    # Prefer native JSON; fall back to joblib if JSON save fails
+                    try:
+                        path = models_dir / f"{timestamp}_{mid}.json"
+                        model.save_model(str(path))
+                    except Exception:
+                        # Fallback to pickle-based artifact
+                        path = models_dir / f"{timestamp}_{mid}.joblib"
+                        _joblib.dump(model, path)
                 else:
                     # retrain a simple model using best params (RF/SVR)
                     if mid == 'RandomForest':
@@ -359,7 +384,12 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
                 with open(meta_path, 'w', encoding='utf-8') as fh:
                     _json.dump(sidecar, fh, ensure_ascii=False, indent=2)
                 saved.append({'model_id': mid, 'artifact': str(path.name), 'meta': meta_path.name})
-            except Exception:
+            except Exception as e:
+                # collect error to surface in response
+                try:
+                    save_errors.append(f"save_failed:{mid}:{str(e)}")
+                except Exception:
+                    save_errors.append(f"save_failed:{mid}")
                 continue
         # persist simple registry into processed_meta
         meta = entry.processed_meta or {}
@@ -383,6 +413,9 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
         warnings.append("strategy=bayes behaves like grid (placeholder)")
     if any(m == 'LSTM' for m in payload.models):
         warnings.append("LSTM is not implemented; consider removing or implementing sequence model")
+    # surface any artifact save errors
+    if 'save_errors' in locals() and save_errors:
+        warnings.extend(save_errors)
 
     return _to_native({
         "data_id": payload.data_id,

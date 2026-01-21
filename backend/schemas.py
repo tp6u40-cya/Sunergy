@@ -30,3 +30,9 @@ class TrainRequest(BaseModel):
     strategy: Literal['manual','grid','bayes'] = 'grid'
     params: Optional[Dict[str, Dict[str, Any]]] = None  # per-model param specs (fixed or ranges)
     target: Optional[str] = 'EAC'
+    # new, optional but with sensible defaults applied in code
+    features: Optional[List[str]] = None           # default to ['GI','TM'] if None
+    time_col: Optional[str] = None                 # attempt auto-detect if None
+    split_method: Literal['time','random'] = 'time'
+    save_model: bool = True
+    model_name: Optional[str] = None
