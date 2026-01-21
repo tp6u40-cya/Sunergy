@@ -174,9 +174,9 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
           </section>
 
           {/* Info: 目前處理檔案 */}
-          <section class=\"bg-white/[0.02] p-5 rounded-2xl border border-white/5\">
-            <h2 class=\"text-sm font-bold text-primary mb-2\">目前處理檔案</h2>
-            <p class=\"text-xs text-white/70 break-all\">{cleanedFileName || '—'}</p>
+          <section className="bg-white/[0.02] p-5 rounded-2xl border border-white/5">
+            <h2 className="text-sm font-bold text-primary mb-2">目前處理檔案</h2>
+            <p className="text-xs text-white/70 break-all">{cleanedFileName || "-"}</p>
           </section>
           {/* Step 2: 選擇模型 */}
           <section className="bg-white/[0.02] p-5 rounded-2xl border border-white/5">
@@ -194,12 +194,13 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
           <section className="bg-white/[0.02] p-5 rounded-2xl border border-white/5">
             <h2 className="text-sm font-bold text-primary mb-4 flex items-center gap-2">
               <span className="size-5 rounded-full bg-primary text-background-dark flex items-center justify-center text-[10px]">3</span> 調整參數
-            </h2>            {/* 策略選擇 */}
-            <div className=\"mb-4 flex items-center gap-2 text-[10px]\">
-              <span className=\"text-white/50\">策略選擇</span>
-              {['manual','grid','bayes'].map(sg => (
-                <label key={sg} className={\px-2 py-1 rounded border cursor-pointer \\}>
-                  <input type=\"radio\" name=\"strategy\" value={sg} checked={strategy===sg} onChange={()=>setStrategy(sg)} className=\"hidden\" />
+            </h2>
+            {/* 策略選擇 */}
+            <div className="mb-4 flex items-center gap-2 text-[10px]">
+              <span className="text-white/50">策略選擇</span>
+              {["manual","grid","bayes"].map((sg) => (
+                <label key={sg} className={["px-2","py-1","rounded","border","cursor-pointer", (strategy===sg ? "border-primary text-primary" : "border-white/10 text-white/50")].join(' ')}>
+                  <input type="radio" name="strategy" value={sg} checked={strategy===sg} onChange={() => setStrategy(sg)} className="hidden" />
                   {sg.toUpperCase()}
                 </label>
               ))}
