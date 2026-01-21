@@ -13,6 +13,8 @@ from schemas import TrainRequest
 # Optional imports for models (detect per-library)
 HAS_SKLEARN = False
 HAS_XGBOOST = False
+HAS_OPTUNA = False
+HAS_TORCH = False
 
 try:
     from sklearn.model_selection import train_test_split, ParameterGrid
@@ -31,6 +33,20 @@ try:
     HAS_XGBOOST = True
 except Exception:
     HAS_XGBOOST = False
+
+try:
+    import optuna  # type: ignore
+    HAS_OPTUNA = True
+except Exception:
+    HAS_OPTUNA = False
+
+try:  # Prefer PyTorch for LSTM
+    import torch  # type: ignore
+    import torch.nn as nn  # type: ignore
+    from torch.utils.data import DataLoader, TensorDataset  # type: ignore
+    HAS_TORCH = True
+except Exception:
+    HAS_TORCH = False
 
 router = APIRouter(prefix="/train", tags=["Train"])
 
@@ -103,10 +119,12 @@ def train_info(data_id: int, db: Session = Depends(get_db)):
 
 def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strategy: str, param_spec: Dict[str, Any]):
     # Dependency checks per model
-    if model_id in ("SVR", "RandomForest", "LSTM") and not HAS_SKLEARN:
+    if model_id in ("SVR", "RandomForest") and not HAS_SKLEARN:
         raise HTTPException(status_code=500, detail="scikit-learn not available on server")
     if model_id == "XGBoost" and not HAS_XGBOOST:
         raise HTTPException(status_code=500, detail="xgboost not available on server")
+    if model_id == "LSTM" and not HAS_TORCH:
+        raise HTTPException(status_code=500, detail="PyTorch not available on server for LSTM")
 
     best = None
     tried = []
@@ -148,13 +166,94 @@ def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strateg
                 grid[k] = [v]
         return list(ParameterGrid(grid)) if grid else [{}]
 
+    # Bayesian Optimization (real, Optuna-based) for non-LSTM models
+    if strategy == "bayes":
+        if not HAS_OPTUNA:
+            raise HTTPException(status_code=500, detail="bayesian optimization requires optuna on server")
+
+        def suggest_from_spec(trial, spec: Dict[str, Any]):
+            params = {}
+            for k, v in (spec or {}).items():
+                if isinstance(v, dict) and {"values"}.issubset(v.keys()):
+                    params[k] = trial.suggest_categorical(k, list(v["values"]))
+                elif isinstance(v, dict) and {"start", "end"}.issubset(v.keys()):
+                    start = float(v["start"])
+                    end = float(v["end"])
+                    step = float(v.get("step", 0))
+                    is_int = float(start).is_integer() and float(end).is_integer() and float(step or 0).is_integer()
+                    if is_int:
+                        if step and step > 0:
+                            params[k] = trial.suggest_int(k, int(start), int(end), step=int(step))
+                        else:
+                            params[k] = trial.suggest_int(k, int(start), int(end))
+                    else:
+                        if step and step > 0:
+                            params[k] = trial.suggest_float(k, start, end, step=step)
+                        else:
+                            params[k] = trial.suggest_float(k, start, end)
+                else:
+                    params[k] = v
+            return params
+
+        def build_model(mid: str, p: Dict[str, Any]):
+            if mid == "SVR":
+                C = float(p.get("C", 1.0))
+                kernel = p.get("kernel", "rbf")
+                gamma = p.get("gamma", "scale")
+                return Pipeline([
+                    ("scaler", StandardScaler()),
+                    ("svr", SKSVR(C=C, kernel=kernel, gamma=gamma)),
+                ])
+            if mid == "RandomForest":
+                n_estimators = int(p.get("n_estimators", 200))
+                max_depth = p.get("max_depth", None)
+                return RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth, random_state=42, n_jobs=-1)
+            if mid == "XGBoost":
+                xgb_kwargs = {
+                    'n_estimators': int(p.get('n_estimators', 300)),
+                    'learning_rate': float(p.get('learning_rate', 0.1)),
+                    'subsample': 0.8,
+                    'colsample_bytree': 0.8,
+                    'random_state': 42,
+                    'n_jobs': -1,
+                    'tree_method': 'hist',
+                }
+                md = p.get('max_depth', 6)
+                if md is not None and md != '' and md != 'None':
+                    xgb_kwargs['max_depth'] = int(md)
+                return xgb.XGBRegressor(**xgb_kwargs)
+            raise ValueError("unsupported model for bayes")
+
+        def objective(trial):
+            p = suggest_from_spec(trial, param_spec or {})
+            model = build_model(model_id, p)
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            # minimize WMAPE
+            eps = 1e-6
+            wmape = float(np.sum(np.abs(y_test - y_pred)) / (np.sum(np.abs(y_test)) + eps))
+            return wmape
+
+        trials = int((param_spec or {}).get('_trials', 30))
+        study = optuna.create_study(direction="minimize")
+        study.optimize(objective, n_trials=trials)
+        best_p = study.best_params
+
+        # evaluate metrics for best params
+        model = build_model(model_id, best_p)
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        r2 = float(r2_score(y_test, y_pred))
+        rmse = float(np.sqrt(mean_squared_error(y_test, y_pred)))
+        mae = float(mean_absolute_error(y_test, y_pred))
+        eps = 1e-6
+        wmape = float(np.sum(np.abs(y_test - y_pred)) / (np.sum(np.abs(y_test)) + eps))
+        return {"best": {"params": best_p, "r2": r2, "rmse": rmse, "mae": mae, "wmape": wmape}, "trials": []}
+
     candidates = [{}]
     if strategy == "manual":
         candidates = [param_spec or {}]
     elif strategy == "grid":
-        candidates = build_grid(param_spec or {})
-    elif strategy == "bayes":
-        # Simple surrogate for now: same as grid (placeholder)
         candidates = build_grid(param_spec or {})
 
     for params in candidates:
@@ -186,9 +285,77 @@ def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strateg
                 xgb_kwargs['max_depth'] = int(md)
             model = xgb.XGBRegressor(**xgb_kwargs)
         elif model_id == "LSTM":
-            # Placeholder: map to RandomForest for now; real LSTM would require PyTorch/TF
-            n_estimators = int(params.get("n_estimators", 200))
-            model = RandomForestRegressor(n_estimators=n_estimators, random_state=42, n_jobs=-1)
+            # True LSTM implementation using PyTorch
+            lookback = int(params.get("lookback", 24))
+            hidden_size = int(params.get("hidden_size", 64))
+            num_layers = int(params.get("num_layers", 1))
+            dropout = float(params.get("dropout", 0.0))
+            lr = float(params.get("lr", 1e-3))
+            epochs = int(params.get("epochs", 20))
+            batch_size = int(params.get("batch_size", 64))
+
+            # build sequences from time-ordered X_train/X_test
+            def make_seq(X, y, win):
+                if len(X) <= win:
+                    raise HTTPException(status_code=400, detail=f"LSTM lookback {win} too large for dataset")
+                Xs, ys = [], []
+                for i in range(win, len(X)):
+                    Xs.append(X[i-win:i])
+                    ys.append(y[i])
+                return np.array(Xs, dtype=np.float32), np.array(ys, dtype=np.float32)
+
+            # Standardize by train stats
+            m = X_train.mean(axis=0)
+            s = X_train.std(axis=0)
+            s[s == 0] = 1.0
+            Xtr = ((X_train - m) / s).astype(np.float32)
+            Xte = ((X_test - m) / s).astype(np.float32)
+            Xtr_seq, ytr_seq = make_seq(Xtr, y_train, lookback)
+            Xte_seq, yte_seq = make_seq(Xte, y_test, lookback)
+
+            class LSTMRegressor(nn.Module):
+                def __init__(self, input_size, hidden_size, num_layers, dropout):
+                    super().__init__()
+                    self.lstm = nn.LSTM(input_size, hidden_size, num_layers=num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0.0)
+                    self.fc = nn.Linear(hidden_size, 1)
+                def forward(self, x):
+                    out, _ = self.lstm(x)
+                    out = out[:, -1, :]
+                    out = self.fc(out)
+                    return out.squeeze(-1)
+
+            device = torch.device("cuda" if (HAS_TORCH and torch.cuda.is_available()) else "cpu")
+            model = LSTMRegressor(input_size=Xtr_seq.shape[-1], hidden_size=hidden_size, num_layers=num_layers, dropout=dropout).to(device)
+            opt = torch.optim.Adam(model.parameters(), lr=lr)
+            loss_fn = nn.MSELoss()
+            ds = TensorDataset(torch.from_numpy(Xtr_seq), torch.from_numpy(ytr_seq))
+            dl = DataLoader(ds, batch_size=batch_size, shuffle=True)
+            model.train()
+            for _ in range(epochs):
+                for xb, yb in dl:
+                    xb = xb.to(device)
+                    yb = yb.to(device)
+                    opt.zero_grad()
+                    pred = model(xb)
+                    loss = loss_fn(pred, yb)
+                    loss.backward()
+                    opt.step()
+
+            # Evaluate
+            model.eval()
+            with torch.no_grad():
+                y_pred = model(torch.from_numpy(Xte_seq).to(device)).cpu().numpy()
+            r2 = float(r2_score(yte_seq, y_pred))
+            rmse = float(np.sqrt(mean_squared_error(yte_seq, y_pred)))
+            mae = float(mean_absolute_error(yte_seq, y_pred))
+            eps = 1e-6
+            wmape = float(np.sum(np.abs(yte_seq - y_pred)) / (np.sum(np.abs(yte_seq)) + eps))
+            metrics = {"r2": r2, "rmse": rmse, "mae": mae, "wmape": wmape}
+            tried.append({"params": params, **metrics})
+            if (best is None) or (metrics["wmape"] < best["wmape"]):
+                best = {"params": params, **metrics}
+            # continue to next candidate (skip generic sklearn evaluate)
+            continue
         else:
             continue
 
