@@ -10,6 +10,7 @@ import models
 from routers.auth import router as auth_router
 from routers.site import router as site_router
 from routers.visualize import router as visualize_router
+from routers.train import router as train_router
 
 # create tables if not exist
 Base.metadata.create_all(bind=engine)
@@ -27,6 +28,7 @@ app.add_middleware(
 app.include_router(auth_router)      # routes prefixed by /auth (router defines prefix)
 app.include_router(site_router)      # routes prefixed by /site
 app.include_router(visualize_router) # routes prefixed by /visualize
+app.include_router(train_router)     # routes prefixed by /train
 
 @app.get("/")
 def root():
