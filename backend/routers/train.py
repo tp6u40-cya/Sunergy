@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from database import get_db
-from models import SiteData
+from models import SiteData, TrainedModel
 from schemas import TrainRequest, PredictRequest
 
 # Optional imports for models (detect per-library)
@@ -177,6 +177,9 @@ def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strateg
 
         grid = {}
         for k, v in (spec or {}).items():
+            # ignore private control keys (e.g., _max_combinations)
+            if isinstance(k, str) and k.startswith('_'):
+                continue
             if isinstance(v, dict) and {"start", "end", "step"}.issubset(v.keys()):
                 start, end, step = v.get("start"), v.get("end"), v.get("step", 1)
                 grid[k] = _make_range(start, end, step)
@@ -275,6 +278,24 @@ def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strateg
         candidates = [param_spec or {}]
     elif strategy == "grid":
         candidates = build_grid(param_spec or {})
+        # XGBoost-only: cap number of combinations if requested
+        if model_id == "XGBoost":
+            try:
+                max_n = int((param_spec or {}).get('_max_combinations', 0) or 0)
+            except Exception:
+                max_n = 0
+            if max_n > 0 and len(candidates) > max_n:
+                # pick evenly spaced indices to cover the space
+                idx = np.linspace(0, len(candidates) - 1, num=max_n)
+                idx = [int(round(i)) for i in idx]
+                # ensure unique and sorted
+                seen = set()
+                selected = []
+                for i in idx:
+                    if i not in seen:
+                        selected.append(i)
+                        seen.add(i)
+                candidates = [candidates[i] for i in selected]
 
     for params in candidates:
         if model_id == "SVR":
@@ -294,8 +315,8 @@ def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strateg
             xgb_kwargs = {
                 'n_estimators': int(params.get('n_estimators', 300)),
                 'learning_rate': float(params.get('learning_rate', 0.1)),
-                'subsample': 0.8,
-                'colsample_bytree': 0.8,
+                'subsample': float(params.get('subsample', 0.8)),
+                'colsample_bytree': float(params.get('colsample_bytree', 0.8)),
                 'random_state': 42,
                 'n_jobs': -1,
                 'tree_method': 'hist',
@@ -303,6 +324,13 @@ def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strateg
             md = params.get('max_depth', 6)
             if md is not None and md != '' and md != 'None':
                 xgb_kwargs['max_depth'] = int(md)
+            # optional regularization / constraints
+            if 'min_child_weight' in params:
+                xgb_kwargs['min_child_weight'] = float(params.get('min_child_weight'))
+            if 'reg_lambda' in params:
+                xgb_kwargs['reg_lambda'] = float(params.get('reg_lambda'))
+            if 'reg_alpha' in params:
+                xgb_kwargs['reg_alpha'] = float(params.get('reg_alpha'))
             model = xgb.XGBRegressor(**xgb_kwargs)
         elif model_id == "LSTM":
             # True LSTM implementation using PyTorch
@@ -524,8 +552,8 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
                     xgb_kwargs = {
                         'n_estimators': int(best_params.get('n_estimators', 300)),
                         'learning_rate': float(best_params.get('learning_rate', 0.1)),
-                        'subsample': 0.8,
-                        'colsample_bytree': 0.8,
+                        'subsample': float(best_params.get('subsample', 0.8)),
+                        'colsample_bytree': float(best_params.get('colsample_bytree', 0.8)),
                         'random_state': 42,
                         'n_jobs': -1,
                         'tree_method': 'hist',
@@ -533,6 +561,12 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
                     md = best_params.get('max_depth', 6)
                     if md is not None and md != '' and md != 'None':
                         xgb_kwargs['max_depth'] = int(md)
+                    if 'min_child_weight' in best_params:
+                        xgb_kwargs['min_child_weight'] = float(best_params.get('min_child_weight'))
+                    if 'reg_lambda' in best_params:
+                        xgb_kwargs['reg_lambda'] = float(best_params.get('reg_lambda'))
+                    if 'reg_alpha' in best_params:
+                        xgb_kwargs['reg_alpha'] = float(best_params.get('reg_alpha'))
                     model = xgb.XGBRegressor(**xgb_kwargs)
                     model.fit(X_train, y_train)
                     # Prefer native JSON; fall back to joblib if JSON save fails
@@ -593,6 +627,20 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
         meta['trained_models'] = history
         entry.processed_meta = meta
         db.add(entry)
+        # also insert trained models into a dedicated table for querying
+        for art in saved:
+            try:
+                tm = TrainedModel(
+                    site_id=entry.site_id,
+                    data_id=payload.data_id,
+                    model_type=art.get('model_id'),
+                    parameters=results.get(art.get('model_id'), {}).get('best_params', {}),
+                    file_path=str((_models_dir(payload.data_id) / art.get('artifact')).relative_to(_uploads_base_dir())),
+                    trained_at=datetime.utcnow(),
+                )
+                db.add(tm)
+            except Exception:
+                continue
         db.commit()
 
     warnings = []

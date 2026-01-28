@@ -1,5 +1,6 @@
 # models.py
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, LargeBinary, JSON, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -30,7 +31,7 @@ class SiteData(Base):
     site_id = Column(Integer, ForeignKey("site.site_id"), nullable=False)
     data_name = Column(String, nullable=True)
     original_rows = Column(Integer, nullable=True)
-    file_bytes = Column(LargeBinary, nullable=True)    # <-- keep file bytes in DB (選 B)
+    # file_bytes column removed: we persist raw files on disk under backend/uploads/raw
     json_data = Column(JSON, nullable=True)            # 原始資料 (records)
     processed_json = Column(JSON, nullable=True)       # 處理後資料 (records)
     processed_at = Column(DateTime, nullable=True)
@@ -38,3 +39,20 @@ class SiteData(Base):
     processed_meta = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     site = relationship("Site", back_populates="site_data")
+
+
+class TrainedModel(Base):
+    __tablename__ = "trained_model"
+
+    # primary key
+    model_id = Column(Integer, primary_key=True, index=True)
+
+    # links
+    site_id = Column(Integer, ForeignKey("site.site_id"), nullable=False, index=True)
+    data_id = Column(Integer, ForeignKey("site_data.data_id"), nullable=True, index=True)
+
+    # metadata
+    model_type = Column(String, nullable=False)            # e.g., 'XGBoost', 'SVR', 'RandomForest', 'LSTM'
+    parameters = Column(JSONB, nullable=True)              # best params used to train this artifact
+    file_path = Column(String, nullable=False)             # relative path under backend/uploads
+    trained_at = Column(DateTime, default=datetime.utcnow, nullable=False)

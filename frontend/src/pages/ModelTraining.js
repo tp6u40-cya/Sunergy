@@ -43,7 +43,7 @@ const StatusLight = ({ wmape }) => {
 // };
 
 // --- 輔助組件：可拉動雙點區間調整器 ---
-const IntervalSlider = ({ label, min, max, start, end, onStartChange, onEndChange }) => {
+const IntervalSlider = ({ label, min, max, start, end, onStartChange, onEndChange, step = 1 }) => {
   const startPct = ((start - min) / (max - min)) * 100;
   const endPct = ((end - min) / (max - min)) * 100;
   const handleStartMove = (v) => onStartChange(Math.min(v, end));
@@ -57,17 +57,17 @@ const IntervalSlider = ({ label, min, max, start, end, onStartChange, onEndChang
       <div className="relative h-6 w-full flex items-center mb-4">
         <div className="absolute h-1 w-full bg-white/10 rounded-full"></div>
         <div className="absolute h-1 bg-primary z-10" style={{ left: `${startPct}%`, right: `${100 - endPct}%` }}></div>
-        <input type="range" min={min} max={max} value={end} onChange={(e) => handleEndMove(Number(e.target.value))} className="absolute w-full h-full appearance-none bg-transparent pointer-events-none z-30 accent-white [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:size-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-primary" />
-        <input type="range" min={min} max={max} value={start} onChange={(e) => handleStartMove(Number(e.target.value))} className="absolute w-full h-full appearance-none bg-transparent pointer-events-none z-20 accent-white [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:size-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-primary" />
+        <input type="range" min={min} max={max} step={step} value={end} onChange={(e) => handleEndMove(Number(e.target.value))} className="absolute w-full h-full appearance-none bg-transparent pointer-events-none z-30 accent-white [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:size-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-primary" />
+        <input type="range" min={min} max={max} step={step} value={start} onChange={(e) => handleStartMove(Number(e.target.value))} className="absolute w-full h-full appearance-none bg-transparent pointer-events-none z-20 accent-white [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:size-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-primary" />
       </div>
       <div className="grid grid-cols-2 gap-4">
         <div>
           <p className="text-[9px] text-white/40 mb-1">起始設定</p>
-          <input type="number" value={start} onChange={(e) => onStartChange(Number(e.target.value))} className="w-full bg-white/5 border border-white/10 rounded p-2 text-xs text-center focus:border-primary outline-none" />
+          <input type="number" step={step} value={start} onChange={(e) => onStartChange(Number(e.target.value))} className="w-full bg-white/5 border border-white/10 rounded p-2 text-xs text-center focus:border-primary outline-none" />
         </div>
         <div>
           <p className="text-[9px] text-white/40 mb-1">結束設定 (MAX: {max})</p>
-          <input type="number" value={end} onChange={(e) => onEndChange(Number(e.target.value))} className="w-full bg-white/5 border border-white/10 rounded p-2 text-xs text-center focus:border-primary outline-none" />
+          <input type="number" step={step} value={end} onChange={(e) => onEndChange(Number(e.target.value))} className="w-full bg-white/5 border border-white/10 rounded p-2 text-xs text-center focus:border-primary outline-none" />
         </div>
       </div>
     </div>
@@ -85,18 +85,28 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
     // XGBoost
     XGB_trees_s: 100, XGB_trees_e: 500,
     XGB_depth_s: 3, XGB_depth_e: 10,
+    XGB_lr_s: 0.01, XGB_lr_e: 0.3,
+    // XGBoost extra params (grid/manual)
+    XGB_subsample_s: 0.5, XGB_subsample_e: 1.0,
+    XGB_colsample_s: 0.5, XGB_colsample_e: 1.0,
+    XGB_min_child_s: 0, XGB_min_child_e: 6,
+    XGB_lambda_s: 0.0, XGB_lambda_e: 2.0,
+    XGB_alpha_s: 0.0, XGB_alpha_e: 1.0,
     // SVR
     SVR_c_s: 1, SVR_c_e: 50,
     // RandomForest
     RF_trees_s: 50, RF_trees_e: 300,
     RF_depth_s: 3, RF_depth_e: 12,
   });
+  // Cap for XGB grid combinations
+  const [xgbMaxComb, setXgbMaxComb] = useState(100);
   const [activeChartLines, setActiveChartLines] = useState({ LSTM: true, XGBoost: true, SVR: true, RandomForest: true });
   const [isTraining, setIsTraining] = useState(false);
   const [isTrained, setIsTrained] = useState(false);
   const [trainingResults, setTrainingResults] = useState({});
   const [strategy, setStrategy] = useState('grid');
   const [cleanedFileName, setCleanedFileName] = useState('');
+  const [bayesTrials, setBayesTrials] = useState(30);
 
   const toggleModel = (id) => setSelectedModels(prev => prev.includes(id) ? prev.filter(m => m !== id) : [...prev, id]);
 
@@ -117,10 +127,29 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
 
     const params = {};
     if (strategy === 'manual') {
-      if (selectedModels.includes('XGBoost')) params['XGBoost'] = { n_estimators: Number(paramIntervals.XGB_trees_e), max_depth: Number(paramIntervals.XGB_depth_e), learning_rate: 0.1 };
+      if (selectedModels.includes('XGBoost')) params['XGBoost'] = {
+        n_estimators: Number(paramIntervals.XGB_trees_e),
+        max_depth: Number(paramIntervals.XGB_depth_e),
+        learning_rate: Number(paramIntervals.XGB_lr_e),
+        subsample: Number(paramIntervals.XGB_subsample_e),
+        colsample_bytree: Number(paramIntervals.XGB_colsample_e),
+        min_child_weight: Number(paramIntervals.XGB_min_child_e),
+        reg_lambda: Number(paramIntervals.XGB_lambda_e),
+        reg_alpha: Number(paramIntervals.XGB_alpha_e),
+      };
       if (selectedModels.includes('RandomForest')) params['RandomForest'] = { n_estimators: Number(paramIntervals.RF_trees_e), max_depth: Number(paramIntervals.RF_depth_e) };
     } else {
-      if (selectedModels.includes('XGBoost')) params['XGBoost'] = { n_estimators: { start: paramIntervals.XGB_trees_s, end: paramIntervals.XGB_trees_e, step: 100 }, max_depth: { start: paramIntervals.XGB_depth_s, end: paramIntervals.XGB_depth_e, step: 1 }, learning_rate: { start: 0.01, end: 0.3, step: 0.05 } };
+      if (selectedModels.includes('XGBoost')) params['XGBoost'] = {
+        n_estimators: { start: paramIntervals.XGB_trees_s, end: paramIntervals.XGB_trees_e, step: 100 },
+        max_depth: { start: paramIntervals.XGB_depth_s, end: paramIntervals.XGB_depth_e, step: 1 },
+        learning_rate: { start: Number(paramIntervals.XGB_lr_s), end: Number(paramIntervals.XGB_lr_e), step: 0.01 },
+        subsample: { start: Number(paramIntervals.XGB_subsample_s), end: Number(paramIntervals.XGB_subsample_e), step: 0.05 },
+        colsample_bytree: { start: Number(paramIntervals.XGB_colsample_s), end: Number(paramIntervals.XGB_colsample_e), step: 0.05 },
+        min_child_weight: { start: Number(paramIntervals.XGB_min_child_s), end: Number(paramIntervals.XGB_min_child_e), step: 1 },
+        reg_lambda: { start: Number(paramIntervals.XGB_lambda_s), end: Number(paramIntervals.XGB_lambda_e), step: 0.1 },
+        reg_alpha: { start: Number(paramIntervals.XGB_alpha_s), end: Number(paramIntervals.XGB_alpha_e), step: 0.1 },
+        _max_combinations: Number(xgbMaxComb),
+      };
       if (selectedModels.includes('RandomForest')) params['RandomForest'] = { n_estimators: { start: paramIntervals.RF_trees_s, end: paramIntervals.RF_trees_e, step: 50 }, max_depth: { start: paramIntervals.RF_depth_s, end: paramIntervals.RF_depth_e, step: 1 } };
     }
     if (selectedModels.includes('SVR')) {
@@ -227,13 +256,61 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
                   {sg.toUpperCase()}
                 </label>
               ))}
+              {strategy === 'bayes' && (
+                <div className="flex items-center gap-2 ml-4">
+                  <span className="text-white/50">TRIALS</span>
+                  <input type="number" min={5} max={200} value={bayesTrials} onChange={(e)=>setBayesTrials(Number(e.target.value))} className="w-20 bg-white/5 border border-white/10 rounded p-1 text-xs text-center focus:border-primary outline-none" />
+                </div>
+              )}
             </div>
             <div className="flex flex-col gap-4">
               {selectedModels.map(id => (
                 <div key={id} className="p-4 bg-black/20 rounded-xl border border-white/5">
-                  <p className="text-[10px] font-bold text-white/60 mb-6 uppercase tracking-tighter border-b border-white/5 pb-1">{id} 模型區間設定</p>
-                  {id === 'LSTM' && <IntervalSlider label="Epochs (訓練次數)" min={1} max={1000} start={paramIntervals.LSTM_epochs_s} end={paramIntervals.LSTM_epochs_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, LSTM_epochs_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, LSTM_epochs_e: v})} />}
-                  {id === 'XGBoost' && <IntervalSlider label="n_estimators (樹木數量)" min={10} max={2000} start={paramIntervals.XGB_trees_s} end={paramIntervals.XGB_trees_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_trees_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_trees_e: v})} />}
+                  <p className="text-[10px] font-bold text-white/60 mb-6 uppercase tracking-tighter border-b border-white/5 pb-1">{id} 模型參數設定</p>
+                  {id === 'LSTM' && (
+                    <>
+                      <IntervalSlider label="Epochs" min={1} max={300} start={paramIntervals.LSTM_epochs_s} end={paramIntervals.LSTM_epochs_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, LSTM_epochs_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, LSTM_epochs_e: v})} />
+                      <IntervalSlider label="Lookback" min={4} max={168} start={paramIntervals.LSTM_lookback_s} end={paramIntervals.LSTM_lookback_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, LSTM_lookback_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, LSTM_lookback_e: v})} />
+                      <IntervalSlider label="Hidden Size" min={16} max={256} start={paramIntervals.LSTM_hidden_s} end={paramIntervals.LSTM_hidden_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, LSTM_hidden_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, LSTM_hidden_e: v})} />
+                    </>
+                  )}
+                  {id === 'XGBoost' && (
+                    <>
+                      <IntervalSlider label="n_estimators" min={10} max={2000} start={paramIntervals.XGB_trees_s} end={paramIntervals.XGB_trees_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_trees_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_trees_e: v})} />
+                      <IntervalSlider label="max_depth" min={1} max={16} start={paramIntervals.XGB_depth_s} end={paramIntervals.XGB_depth_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_depth_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_depth_e: v})} />
+                      <IntervalSlider step={0.01} label="learning_rate" min={0.01} max={0.3} start={paramIntervals.XGB_lr_s} end={paramIntervals.XGB_lr_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_lr_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_lr_e: v})} />
+                      <IntervalSlider step={0.05} label="subsample" min={0.5} max={1.0} start={paramIntervals.XGB_subsample_s} end={paramIntervals.XGB_subsample_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_subsample_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_subsample_e: v})} />
+                      <IntervalSlider step={0.05} label="colsample_bytree" min={0.5} max={1.0} start={paramIntervals.XGB_colsample_s} end={paramIntervals.XGB_colsample_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_colsample_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_colsample_e: v})} />
+                      <IntervalSlider step={1} label="min_child_weight" min={0} max={10} start={paramIntervals.XGB_min_child_s} end={paramIntervals.XGB_min_child_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_min_child_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_min_child_e: v})} />
+                      <IntervalSlider step={0.1} label="reg_lambda" min={0.0} max={5.0} start={paramIntervals.XGB_lambda_s} end={paramIntervals.XGB_lambda_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_lambda_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_lambda_e: v})} />
+                      <IntervalSlider step={0.1} label="reg_alpha" min={0.0} max={5.0} start={paramIntervals.XGB_alpha_s} end={paramIntervals.XGB_alpha_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_alpha_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_alpha_e: v})} />
+                      {strategy === 'grid' && (function(){
+                        const cnt = (s,e,st)=>{
+                          const step = Math.max(Number(st)||0, 0.000001);
+                          return Math.max(1, Math.floor(((Number(e)-Number(s))/step)+0.000001)+1);
+                        };
+                        const combos =
+                          cnt(paramIntervals.XGB_trees_s, paramIntervals.XGB_trees_e, 100) *
+                          cnt(paramIntervals.XGB_depth_s, paramIntervals.XGB_depth_e, 1) *
+                          cnt(paramIntervals.XGB_lr_s,    paramIntervals.XGB_lr_e,    0.01) *
+                          cnt(paramIntervals.XGB_subsample_s, paramIntervals.XGB_subsample_e, 0.05) *
+                          cnt(paramIntervals.XGB_colsample_s, paramIntervals.XGB_colsample_e, 0.05) *
+                          cnt(paramIntervals.XGB_min_child_s, paramIntervals.XGB_min_child_e, 1) *
+                          cnt(paramIntervals.XGB_lambda_s, paramIntervals.XGB_lambda_e, 0.1) *
+                          cnt(paramIntervals.XGB_alpha_s,  paramIntervals.XGB_alpha_e,  0.1);
+                        const over = combos > xgbMaxComb;
+                        return (
+                          <div className="mt-2 text-[10px] text-white/60 flex items-center gap-3">
+                            <div className="flex items-center gap-1">
+                              <span className="text-white/40">組合上限</span>
+                              <input type="number" min={10} max={1000} step={10} value={xgbMaxComb} onChange={(e)=>setXgbMaxComb(Number(e.target.value)||10)} className="w-20 bg-white/5 border border-white/10 rounded p-1 text-[10px] text-center focus:border-primary outline-none" />
+                            </div>
+                            <div className={over?"text-red-400":"text-white/50"}>預估組合數：{combos}{over?`（將抽樣至 ${xgbMaxComb} 組）`:''}</div>
+                          </div>
+                        );
+                      })()}
+                    </>
+                  )}
                   {id === 'SVR' && <IntervalSlider label="C (懲罰參數區間)" min={0.1} max={100} start={paramIntervals.SVR_c_s} end={paramIntervals.SVR_c_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, SVR_c_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, SVR_c_e: v})} />}
                   {id === 'RandomForest' && <IntervalSlider label="n_estimators (森林規模)" min={10} max={1000} start={paramIntervals.RF_trees_s} end={paramIntervals.RF_trees_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, RF_trees_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, RF_trees_e: v})} />}
                 </div>

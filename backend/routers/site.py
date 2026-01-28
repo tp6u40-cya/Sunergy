@@ -106,7 +106,6 @@ async def upload_site_data(
         site_id=site_id,
         data_name=file.filename,
         original_rows=original_rows,
-        file_bytes=None,  # no longer store bytes in DB; use disk path instead
         json_data=json_data,
         processed_meta={
             "raw_path": str(raw_path.relative_to(_uploads_base_dir())),
@@ -147,9 +146,6 @@ def download_data(data_id: int, db: Session = Depends(get_db)):
                 size = None
             return {"file_name": entry.data_name, "size": size, "path": str(raw_rel)}
 
-    # Fallback to DB bytes metadata if still present
-    if entry.file_bytes:
-        return {"file_name": entry.data_name, "size": len(entry.file_bytes)}
+    # No DB-bytes fallback anymore: files are stored on disk only
 
     raise HTTPException(status_code=404, detail="no file stored")
-
