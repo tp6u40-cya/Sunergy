@@ -78,10 +78,15 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
   const [splitRatio, setSplitRatio] = useState(80);
   const [selectedModels, setSelectedModels] = useState(['XGBoost']);
   const [paramIntervals, setParamIntervals] = useState({
-    // LSTM
+    // LSTM basic params
     LSTM_epochs_s: 10, LSTM_epochs_e: 60,
     LSTM_lookback_s: 12, LSTM_lookback_e: 72,
     LSTM_hidden_s: 32, LSTM_hidden_e: 128,
+    // LSTM advanced params
+    LSTM_num_layers_s: 1, LSTM_num_layers_e: 3,
+    LSTM_dropout_s: 0.0, LSTM_dropout_e: 0.5,
+    LSTM_lr_s: 0.0001, LSTM_lr_e: 0.01,
+    LSTM_batch_size_s: 32, LSTM_batch_size_e: 128,
     // XGBoost
     XGB_trees_s: 100, XGB_trees_e: 500,
     XGB_depth_s: 3, XGB_depth_e: 10,
@@ -107,6 +112,10 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
   const [strategy, setStrategy] = useState('grid');
   const [cleanedFileName, setCleanedFileName] = useState('');
   const [bayesTrials, setBayesTrials] = useState(30);
+  // Training progress state
+  const [trainingProgress, setTrainingProgress] = useState(0);
+  const [trainingStatus, setTrainingStatus] = useState('');
+  const [showAdvancedLSTM, setShowAdvancedLSTM] = useState(false);
 
   const toggleModel = (id) => setSelectedModels(prev => prev.includes(id) ? prev.filter(m => m !== id) : [...prev, id]);
 
@@ -117,7 +126,7 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
     fetch(`http://127.0.0.1:8000/train/info?data_id=${dataId}`)
       .then(r => r.json())
       .then(j => { if (j && j.cleaned_file) setCleanedFileName(j.cleaned_file); })
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   const handleStartTraining = async () => {
@@ -162,25 +171,87 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
     }
     if (selectedModels.includes('LSTM')) {
       if (strategy === 'manual') {
-        params['LSTM'] = { epochs: Number(paramIntervals.LSTM_epochs_e), lookback: Number(paramIntervals.LSTM_lookback_e), hidden_size: Number(paramIntervals.LSTM_hidden_e) };
+        params['LSTM'] = {
+          epochs: Number(paramIntervals.LSTM_epochs_e),
+          lookback: Number(paramIntervals.LSTM_lookback_e),
+          hidden_size: Number(paramIntervals.LSTM_hidden_e),
+          num_layers: Number(paramIntervals.LSTM_num_layers_e),
+          dropout: Number(paramIntervals.LSTM_dropout_e),
+          lr: Number(paramIntervals.LSTM_lr_e),
+          batch_size: Number(paramIntervals.LSTM_batch_size_e)
+        };
       } else {
-        params['LSTM'] = { lookback: { start: paramIntervals.LSTM_lookback_s, end: paramIntervals.LSTM_lookback_e, step: 12 }, hidden_size: { start: paramIntervals.LSTM_hidden_s, end: paramIntervals.LSTM_hidden_e, step: 32 }, epochs: { start: paramIntervals.LSTM_epochs_s, end: paramIntervals.LSTM_epochs_e, step: 10 } };
+        params['LSTM'] = {
+          lookback: { start: paramIntervals.LSTM_lookback_s, end: paramIntervals.LSTM_lookback_e, step: 12 },
+          hidden_size: { start: paramIntervals.LSTM_hidden_s, end: paramIntervals.LSTM_hidden_e, step: 32 },
+          epochs: { start: paramIntervals.LSTM_epochs_s, end: paramIntervals.LSTM_epochs_e, step: 10 },
+          num_layers: { start: paramIntervals.LSTM_num_layers_s, end: paramIntervals.LSTM_num_layers_e, step: 1 },
+          dropout: { start: paramIntervals.LSTM_dropout_s, end: paramIntervals.LSTM_dropout_e, step: 0.1 },
+          lr: { start: paramIntervals.LSTM_lr_s, end: paramIntervals.LSTM_lr_e, step: 0.001 },
+          batch_size: { start: paramIntervals.LSTM_batch_size_s, end: paramIntervals.LSTM_batch_size_e, step: 32 }
+        };
       }
     }
 
+    // Add _trials parameter for Bayesian optimization strategy
+    if (strategy === 'bayes') {
+      Object.keys(params).forEach(modelKey => {
+        params[modelKey]._trials = Number(bayesTrials);
+      });
+    }
+
     setIsTraining(true);
+    setTrainingProgress(0);
+    setTrainingStatus('準備訓練資料...');
+
+    // Simulate progress updates since backend doesn't support streaming
+    const progressInterval = setInterval(() => {
+      setTrainingProgress(prev => {
+        if (prev < 90) {
+          const increment = Math.random() * 10 + 2;
+          return Math.min(prev + increment, 90);
+        }
+        return prev;
+      });
+    }, 500);
+
+    // Update status based on strategy
+    setTimeout(() => setTrainingStatus(`執行 ${strategy === 'bayes' ? 'Bayesian 優化' : strategy === 'grid' ? '網格搜索' : '手動參數'} 訓練中...`), 1000);
+
     try {
       const res = await fetch('http://127.0.0.1:8000/train/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data_id: Number(dataId), split_ratio: Number(splitRatio)/100, models: selectedModels, strategy, params })
+        body: JSON.stringify({ data_id: Number(dataId), split_ratio: Number(splitRatio) / 100, models: selectedModels, strategy, params })
       });
+
+      clearInterval(progressInterval);
+      setTrainingProgress(95);
+      setTrainingStatus('處理訓練結果...');
+
       const json = await res.json();
+      console.log('Training API response:', json); // Debug log
       if (!res.ok) throw new Error(json?.detail || '訓練失敗');
-      setTrainingResults(json.results || {});
-      setIsTrained(true);
+
+      // Check if results exist and have data
+      const results = json.results || {};
+      console.log('Training results:', results); // Debug log
+
+      setTrainingProgress(100);
+      setTrainingStatus('訓練完成！');
+
+      if (Object.keys(results).length === 0) {
+        alert('訓練完成但沒有返回結果，請檢查後端日誌');
+      } else {
+        setTrainingResults(results);
+        setIsTrained(true);
+      }
       if (json.cleaned_file) setCleanedFileName(json.cleaned_file);
     } catch (e) {
+      clearInterval(progressInterval);
+      setTrainingProgress(0);
+      setTrainingStatus('');
+      console.error('Training error:', e); // Debug log
       alert(e.message || '訓練失敗');
     } finally {
       setIsTraining(false);
@@ -198,7 +269,7 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
             <span className="material-symbols-outlined !text-lg">arrow_back</span>
             返回上一步
           </button>
-          
+
           <div className="text-sm font-medium">
             <span className="text-white/40">1. 上傳資料</span>
             <span className="mx-2 text-white/30">/</span>
@@ -207,8 +278,8 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
             <span className="text-white/40 ">3. 調整單位</span>
             <span className="mx-2 text-white/30">/</span>
             <span className="text-primary font-bold">4. 模型訓練與優化</span>
-            
-            
+
+
           </div>
         </div>
       </div>
@@ -221,7 +292,7 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
             <h2 className="text-sm font-bold text-primary mb-4 flex items-center gap-2">
               <span className="size-5 rounded-full bg-primary text-background-dark flex items-center justify-center text-[10px]">1</span> 分割資料
             </h2>
-            <div className="flex justify-between text-[10px] text-white/50 mb-2"><span>訓練集 {splitRatio}%</span><span>測試集 {100-splitRatio}%</span></div>
+            <div className="flex justify-between text-[10px] text-white/50 mb-2"><span>訓練集 {splitRatio}%</span><span>測試集 {100 - splitRatio}%</span></div>
             <input type="range" min="50" max="95" step="5" value={splitRatio} onChange={(e) => setSplitRatio(e.target.value)} className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-primary" />
           </section>
 
@@ -250,16 +321,16 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
             {/* 策略選擇 */}
             <div className="mb-4 flex items-center gap-2 text-[10px]">
               <span className="text-white/50">策略選擇</span>
-              {["manual","grid","bayes"].map((sg) => (
-                <label key={sg} className={["px-2","py-1","rounded","border","cursor-pointer", (strategy===sg ? "border-primary text-primary" : "border-white/10 text-white/50")].join(' ')}>
-                  <input type="radio" name="strategy" value={sg} checked={strategy===sg} onChange={() => setStrategy(sg)} className="hidden" />
+              {["manual", "grid", "bayes"].map((sg) => (
+                <label key={sg} className={["px-2", "py-1", "rounded", "border", "cursor-pointer", (strategy === sg ? "border-primary text-primary" : "border-white/10 text-white/50")].join(' ')}>
+                  <input type="radio" name="strategy" value={sg} checked={strategy === sg} onChange={() => setStrategy(sg)} className="hidden" />
                   {sg.toUpperCase()}
                 </label>
               ))}
               {strategy === 'bayes' && (
                 <div className="flex items-center gap-2 ml-4">
                   <span className="text-white/50">TRIALS</span>
-                  <input type="number" min={5} max={200} value={bayesTrials} onChange={(e)=>setBayesTrials(Number(e.target.value))} className="w-20 bg-white/5 border border-white/10 rounded p-1 text-xs text-center focus:border-primary outline-none" />
+                  <input type="number" min={5} max={200} value={bayesTrials} onChange={(e) => setBayesTrials(Number(e.target.value))} className="w-20 bg-white/5 border border-white/10 rounded p-1 text-xs text-center focus:border-primary outline-none" />
                 </div>
               )}
             </div>
@@ -269,50 +340,68 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
                   <p className="text-[10px] font-bold text-white/60 mb-6 uppercase tracking-tighter border-b border-white/5 pb-1">{id} 模型參數設定</p>
                   {id === 'LSTM' && (
                     <>
-                      <IntervalSlider label="Epochs" min={1} max={300} start={paramIntervals.LSTM_epochs_s} end={paramIntervals.LSTM_epochs_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, LSTM_epochs_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, LSTM_epochs_e: v})} />
-                      <IntervalSlider label="Lookback" min={4} max={168} start={paramIntervals.LSTM_lookback_s} end={paramIntervals.LSTM_lookback_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, LSTM_lookback_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, LSTM_lookback_e: v})} />
-                      <IntervalSlider label="Hidden Size" min={16} max={256} start={paramIntervals.LSTM_hidden_s} end={paramIntervals.LSTM_hidden_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, LSTM_hidden_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, LSTM_hidden_e: v})} />
+                      <IntervalSlider label="Epochs" min={1} max={300} start={paramIntervals.LSTM_epochs_s} end={paramIntervals.LSTM_epochs_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_epochs_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_epochs_e: v })} />
+                      <IntervalSlider label="Lookback" min={4} max={168} start={paramIntervals.LSTM_lookback_s} end={paramIntervals.LSTM_lookback_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_lookback_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_lookback_e: v })} />
+                      <IntervalSlider label="Hidden Size" min={16} max={256} start={paramIntervals.LSTM_hidden_s} end={paramIntervals.LSTM_hidden_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_hidden_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_hidden_e: v })} />
+
+                      {/* Advanced LSTM parameters toggle */}
+                      <button
+                        onClick={() => setShowAdvancedLSTM(!showAdvancedLSTM)}
+                        className="mt-2 text-[10px] text-primary/70 hover:text-primary transition-colors flex items-center gap-1"
+                      >
+                        <span>{showAdvancedLSTM ? '▼' : '▶'}</span>
+                        {showAdvancedLSTM ? '隱藏進階參數' : '顯示進階參數'}
+                      </button>
+
+                      {showAdvancedLSTM && (
+                        <div className="mt-3 pt-3 border-t border-white/5">
+                          <IntervalSlider label="Num Layers" min={1} max={4} step={1} start={paramIntervals.LSTM_num_layers_s} end={paramIntervals.LSTM_num_layers_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_num_layers_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_num_layers_e: v })} />
+                          <IntervalSlider label="Dropout" min={0} max={0.7} step={0.05} start={paramIntervals.LSTM_dropout_s} end={paramIntervals.LSTM_dropout_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_dropout_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_dropout_e: v })} />
+                          <IntervalSlider label="Learning Rate" min={0.0001} max={0.02} step={0.0005} start={paramIntervals.LSTM_lr_s} end={paramIntervals.LSTM_lr_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_lr_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_lr_e: v })} />
+                          <IntervalSlider label="Batch Size" min={16} max={256} step={16} start={paramIntervals.LSTM_batch_size_s} end={paramIntervals.LSTM_batch_size_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_batch_size_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, LSTM_batch_size_e: v })} />
+                        </div>
+                      )}
                     </>
                   )}
                   {id === 'XGBoost' && (
                     <>
-                      <IntervalSlider label="n_estimators" min={10} max={2000} start={paramIntervals.XGB_trees_s} end={paramIntervals.XGB_trees_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_trees_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_trees_e: v})} />
-                      <IntervalSlider label="max_depth" min={1} max={16} start={paramIntervals.XGB_depth_s} end={paramIntervals.XGB_depth_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_depth_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_depth_e: v})} />
-                      <IntervalSlider step={0.01} label="learning_rate" min={0.01} max={0.3} start={paramIntervals.XGB_lr_s} end={paramIntervals.XGB_lr_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_lr_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_lr_e: v})} />
-                      <IntervalSlider step={0.05} label="subsample" min={0.5} max={1.0} start={paramIntervals.XGB_subsample_s} end={paramIntervals.XGB_subsample_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_subsample_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_subsample_e: v})} />
-                      <IntervalSlider step={0.05} label="colsample_bytree" min={0.5} max={1.0} start={paramIntervals.XGB_colsample_s} end={paramIntervals.XGB_colsample_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_colsample_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_colsample_e: v})} />
-                      <IntervalSlider step={1} label="min_child_weight" min={0} max={10} start={paramIntervals.XGB_min_child_s} end={paramIntervals.XGB_min_child_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_min_child_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_min_child_e: v})} />
-                      <IntervalSlider step={0.1} label="reg_lambda" min={0.0} max={5.0} start={paramIntervals.XGB_lambda_s} end={paramIntervals.XGB_lambda_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_lambda_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_lambda_e: v})} />
-                      <IntervalSlider step={0.1} label="reg_alpha" min={0.0} max={5.0} start={paramIntervals.XGB_alpha_s} end={paramIntervals.XGB_alpha_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, XGB_alpha_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, XGB_alpha_e: v})} />
-                      {strategy === 'grid' && (function(){
-                        const cnt = (s,e,st)=>{
-                          const step = Math.max(Number(st)||0, 0.000001);
-                          return Math.max(1, Math.floor(((Number(e)-Number(s))/step)+0.000001)+1);
+                      <IntervalSlider label="n_estimators" min={10} max={2000} start={paramIntervals.XGB_trees_s} end={paramIntervals.XGB_trees_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, XGB_trees_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, XGB_trees_e: v })} />
+                      <IntervalSlider label="max_depth" min={1} max={16} start={paramIntervals.XGB_depth_s} end={paramIntervals.XGB_depth_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, XGB_depth_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, XGB_depth_e: v })} />
+                      <IntervalSlider step={0.01} label="learning_rate" min={0.01} max={0.3} start={paramIntervals.XGB_lr_s} end={paramIntervals.XGB_lr_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, XGB_lr_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, XGB_lr_e: v })} />
+                      <IntervalSlider step={0.05} label="subsample" min={0.5} max={1.0} start={paramIntervals.XGB_subsample_s} end={paramIntervals.XGB_subsample_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, XGB_subsample_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, XGB_subsample_e: v })} />
+                      <IntervalSlider step={0.05} label="colsample_bytree" min={0.5} max={1.0} start={paramIntervals.XGB_colsample_s} end={paramIntervals.XGB_colsample_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, XGB_colsample_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, XGB_colsample_e: v })} />
+                      <IntervalSlider step={1} label="min_child_weight" min={0} max={10} start={paramIntervals.XGB_min_child_s} end={paramIntervals.XGB_min_child_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, XGB_min_child_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, XGB_min_child_e: v })} />
+                      <IntervalSlider step={0.1} label="reg_lambda" min={0.0} max={5.0} start={paramIntervals.XGB_lambda_s} end={paramIntervals.XGB_lambda_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, XGB_lambda_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, XGB_lambda_e: v })} />
+                      <IntervalSlider step={0.1} label="reg_alpha" min={0.0} max={5.0} start={paramIntervals.XGB_alpha_s} end={paramIntervals.XGB_alpha_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, XGB_alpha_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, XGB_alpha_e: v })} />
+                      {strategy === 'grid' && (function () {
+                        const cnt = (s, e, st) => {
+                          const step = Math.max(Number(st) || 0, 0.000001);
+                          return Math.max(1, Math.floor(((Number(e) - Number(s)) / step) + 0.000001) + 1);
                         };
                         const combos =
                           cnt(paramIntervals.XGB_trees_s, paramIntervals.XGB_trees_e, 100) *
                           cnt(paramIntervals.XGB_depth_s, paramIntervals.XGB_depth_e, 1) *
-                          cnt(paramIntervals.XGB_lr_s,    paramIntervals.XGB_lr_e,    0.01) *
+                          cnt(paramIntervals.XGB_lr_s, paramIntervals.XGB_lr_e, 0.01) *
                           cnt(paramIntervals.XGB_subsample_s, paramIntervals.XGB_subsample_e, 0.05) *
                           cnt(paramIntervals.XGB_colsample_s, paramIntervals.XGB_colsample_e, 0.05) *
                           cnt(paramIntervals.XGB_min_child_s, paramIntervals.XGB_min_child_e, 1) *
                           cnt(paramIntervals.XGB_lambda_s, paramIntervals.XGB_lambda_e, 0.1) *
-                          cnt(paramIntervals.XGB_alpha_s,  paramIntervals.XGB_alpha_e,  0.1);
+                          cnt(paramIntervals.XGB_alpha_s, paramIntervals.XGB_alpha_e, 0.1);
                         const over = combos > xgbMaxComb;
                         return (
                           <div className="mt-2 text-[10px] text-white/60 flex items-center gap-3">
                             <div className="flex items-center gap-1">
                               <span className="text-white/40">組合上限</span>
-                              <input type="number" min={10} max={1000} step={10} value={xgbMaxComb} onChange={(e)=>setXgbMaxComb(Number(e.target.value)||10)} className="w-20 bg-white/5 border border-white/10 rounded p-1 text-[10px] text-center focus:border-primary outline-none" />
+                              <input type="number" min={10} max={1000} step={10} value={xgbMaxComb} onChange={(e) => setXgbMaxComb(Number(e.target.value) || 10)} className="w-20 bg-white/5 border border-white/10 rounded p-1 text-[10px] text-center focus:border-primary outline-none" />
                             </div>
-                            <div className={over?"text-red-400":"text-white/50"}>預估組合數：{combos}{over?`（將抽樣至 ${xgbMaxComb} 組）`:''}</div>
+                            <div className={over ? "text-red-400" : "text-white/50"}>預估組合數：{combos}{over ? `（將抽樣至 ${xgbMaxComb} 組）` : ''}</div>
                           </div>
                         );
                       })()}
                     </>
                   )}
-                  {id === 'SVR' && <IntervalSlider label="C (懲罰參數區間)" min={0.1} max={100} start={paramIntervals.SVR_c_s} end={paramIntervals.SVR_c_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, SVR_c_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, SVR_c_e: v})} />}
-                  {id === 'RandomForest' && <IntervalSlider label="n_estimators (森林規模)" min={10} max={1000} start={paramIntervals.RF_trees_s} end={paramIntervals.RF_trees_e} onStartChange={(v)=>setParamIntervals({...paramIntervals, RF_trees_s: v})} onEndChange={(v)=>setParamIntervals({...paramIntervals, RF_trees_e: v})} />}
+                  {id === 'SVR' && <IntervalSlider label="C (懲罰參數區間)" min={0.1} max={100} start={paramIntervals.SVR_c_s} end={paramIntervals.SVR_c_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, SVR_c_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, SVR_c_e: v })} />}
+                  {id === 'RandomForest' && <IntervalSlider label="n_estimators (森林規模)" min={10} max={1000} start={paramIntervals.RF_trees_s} end={paramIntervals.RF_trees_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, RF_trees_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, RF_trees_e: v })} />}
                 </div>
               ))}
               {selectedModels.length === 0 && <p className="text-center text-[10px] text-white/20 italic py-4">請先在步驟 2 選擇模型</p>}
@@ -322,6 +411,26 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
           <button onClick={handleStartTraining} disabled={isTraining || selectedModels.length === 0} className="w-full py-4 bg-primary text-background-dark rounded-xl font-black text-sm transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-30">
             {isTraining ? '模型訓練中...' : '開始執行訓練'}
           </button>
+
+          {/* Training Progress Bar */}
+          {isTraining && (
+            <div className="mt-4 p-4 bg-white/[0.02] rounded-xl border border-white/5">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs text-white/60">{trainingStatus}</span>
+                <span className="text-xs font-bold text-primary">{Math.round(trainingProgress)}%</span>
+              </div>
+              <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-primary to-green-400 rounded-full transition-all duration-300 ease-out"
+                  style={{ width: `${trainingProgress}%` }}
+                />
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+                <span className="text-[10px] text-white/40">正在處理 {selectedModels.join(', ')} ...</span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 右側：結果顯示 */}
@@ -330,8 +439,8 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
             {isTrained ? (
               <div className="w-full animate-fade-in">
                 <div className="flex justify-between items-center mb-6">
-                   <h2 className="text-xl font-bold">訓練結果看板</h2>
-                   {/* <div className="flex gap-2">
+                  <h2 className="text-xl font-bold">訓練結果看板</h2>
+                  {/* <div className="flex gap-2">
                       {Object.keys(trainingResults).map(id => (
                         <label key={id} className="flex items-center gap-1 cursor-pointer">
                           <input type="checkbox" checked={activeChartLines[id]} onChange={()=>setActiveChartLines({...activeChartLines, [id]: !activeChartLines[id]})} className="size-3 accent-primary" />
@@ -353,10 +462,10 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
                         <tr key={res.id} className="hover:bg-white/5 transition-colors">
                           <td className="px-4 py-4 font-bold text-primary font-sans">{res.id}</td>
                           <td className="px-4 py-4"><StatusLight wmape={res.wmape} /></td>
-                          <td className="px-4 py-4 text-right text-green-400">{res.r2}</td>
-                          <td className="px-4 py-4 text-right">{res.rmse}</td>
-                          <td className="px-4 py-4 text-right">{res.mae}</td>
-                          <td className="px-4 py-4 text-right text-yellow-500/80">{res.wmape}</td>
+                          <td className="px-4 py-4 text-right text-green-400">{res.r2 !== undefined && res.r2 !== null ? Number(res.r2).toFixed(3) : '-'}</td>
+                          <td className="px-4 py-4 text-right">{res.rmse !== undefined && res.rmse !== null ? Number(res.rmse).toFixed(3) : '-'}</td>
+                          <td className="px-4 py-4 text-right">{res.mae !== undefined && res.mae !== null ? Number(res.mae).toFixed(3) : '-'}</td>
+                          <td className="px-4 py-4 text-right text-yellow-500/80">{res.wmape !== undefined && res.wmape !== null ? Number(res.wmape).toFixed(4) : '-'}</td>
                         </tr>
                       ))}
                     </tbody>
