@@ -1,231 +1,315 @@
 // src/pages/PredictSolar.js
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Navbar from '../components/Navbar';
 
-// --- 重新設計：專業診斷指標組件 (含警示燈) ---
-const DiagnosticMetrics = ({ errorValue, totalPower, avgIrradiance }) => {
-  const value = parseFloat(errorValue);
-  let status = { 
-    color: 'text-green-400', 
-    bgColor: 'bg-green-500', 
-    label: '發電正常', 
-    shadow: 'shadow-[0_0_15px_rgba(34,197,94,0.4)]',
-    desc: '預測與實際高度吻合'
-  };
-  
-  if (value > 15) {
-    status = { 
-      color: 'text-red-400', 
-      bgColor: 'bg-red-500', 
-      label: '發電異常', 
-      shadow: 'shadow-[0_0_15px_rgba(239,68,68,0.4)]',
-      desc: '偏差過大，請檢查設備'
-    };
-  } else if (value > 5) {
-    status = { 
-      color: 'text-yellow-400', 
-      bgColor: 'bg-yellow-500', 
-      label: '需留意', 
-      shadow: 'shadow-[0_0_15px_rgba(234,179,8,0.4)]',
-      desc: '環境干擾或輕微積塵'
-    };
-  }
+/* ── 誤差燈號組件 ── */
+const ErrorLight = ({ pct }) => {
+  if (pct === null || pct === undefined) return <span className="text-white/20 text-[10px]">—</span>;
+  const v = Number(pct);
+  if (v <= 5) return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="size-2.5 rounded-full bg-green-400 shadow-[0_0_6px_rgba(34,197,94,0.5)]" />
+      <span className="text-green-400 text-[10px] font-mono">{v.toFixed(1)}%</span>
+    </span>
+  );
+  if (v <= 15) return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="size-2.5 rounded-full bg-yellow-400 shadow-[0_0_6px_rgba(234,179,8,0.5)]" />
+      <span className="text-yellow-400 text-[10px] font-mono">{v.toFixed(1)}%</span>
+    </span>
+  );
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="size-2.5 rounded-full bg-red-400 shadow-[0_0_6px_rgba(239,68,68,0.5)] animate-pulse" />
+      <span className="text-red-400 text-[10px] font-mono">{v.toFixed(1)}%</span>
+    </span>
+  );
+};
+
+/* ── 整體診斷燈號 ── */
+const OverallStatus = ({ avgError }) => {
+  if (avgError === null || avgError === undefined) return null;
+  const v = Number(avgError);
+  let cfg = { color: 'text-green-400', bg: 'bg-green-500', shadow: 'shadow-[0_0_15px_rgba(34,197,94,0.4)]', label: '發電正常', desc: '預測與實際高度吻合' };
+  if (v > 15) cfg = { color: 'text-red-400', bg: 'bg-red-500', shadow: 'shadow-[0_0_15px_rgba(239,68,68,0.4)]', label: '發電異常', desc: '偏差過大，請檢查設備' };
+  else if (v > 5) cfg = { color: 'text-yellow-400', bg: 'bg-yellow-500', shadow: 'shadow-[0_0_15px_rgba(234,179,8,0.4)]', label: '需留意', desc: '環境干擾或輕微積塵' };
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-      {/* 總發電量卡片 */}
-      <div className="bg-white/5 border border-white/10 p-5 rounded-2xl flex flex-col justify-center">
-        <p className="text-[10px] text-white/40 uppercase font-bold mb-2 tracking-widest">預估發電總量</p>
-        <div className="flex items-baseline gap-2">
-          <span className="text-3xl font-black font-mono text-white">{totalPower}</span>
-          <span className="text-xs text-primary font-bold">kWh</span>
-        </div>
+    <div className="bg-white/5 border border-white/10 p-5 rounded-2xl flex items-center gap-4">
+      <div className="relative flex items-center justify-center">
+        <div className={`size-10 rounded-full ${cfg.bg} ${cfg.shadow} animate-pulse`} />
       </div>
-
-      {/* 平均日照卡片 */}
-      <div className="bg-white/5 border border-white/10 p-5 rounded-2xl flex flex-col justify-center">
-        <p className="text-[10px] text-white/40 uppercase font-bold mb-2 tracking-widest">平均日照強度</p>
-        <div className="flex items-baseline gap-2">
-          <span className="text-3xl font-black font-mono text-white">{avgIrradiance}</span>
-          <span className="text-xs text-primary font-bold">W/m²</span>
-        </div>
-      </div>
-
-      {/* 警示燈診斷卡片 - 現在與前兩者完全對齊 */}
-      <div className="bg-white/5 border border-white/10 p-5 rounded-2xl flex items-center gap-4">
-        <div className={`relative flex items-center justify-center`}>
-          <div className={`size-10 rounded-full ${status.bgColor} ${status.shadow} animate-pulse`}></div>
-          <div className="absolute size-14 rounded-full border border-white/5 animate-ping opacity-20"></div>
-        </div>
-        <div className="flex flex-col">
-          <p className="text-[10px] text-white/40 uppercase font-bold tracking-widest mb-0.5">系統診斷狀態</p>
-          <span className={`text-lg font-black ${status.color}`}>{status.label}</span>
-          <span className="text-[10px] text-white/30 italic">{status.desc}</span>
-        </div>
+      <div className="flex flex-col">
+        <p className="text-[10px] text-white/40 uppercase font-bold tracking-widest mb-0.5">系統診斷狀態</p>
+        <span className={`text-lg font-black ${cfg.color}`}>{cfg.label}</span>
+        <span className="text-[10px] text-white/30 italic">{cfg.desc}</span>
       </div>
     </div>
   );
 };
 
-// --- 對比圖表 (優化座標軸與圖例) ---
-const ComparisonChart = () => (
-  <div className="w-full flex-1 min-h-[350px] bg-black/40 rounded-2xl p-8 border border-white/10 relative mt-4 flex flex-col">
-    <div className="flex justify-between items-center mb-6">
-      <h3 className="text-xs font-bold text-white/50 uppercase tracking-widest flex items-center gap-2">
-        <span className="material-symbols-outlined !text-sm">stacked_line_chart</span>
-        發電相關性分析圖
-      </h3>
-      <div className="flex gap-4 text-[10px] font-bold">
-        <span className="flex items-center gap-2 text-white/60">
-          <div className="w-4 h-0.5 bg-blue-400 opacity-40 border-b border-dashed"></div> 實際值
-        </span>
-        <span className="flex items-center gap-2 text-primary">
-          <div className="w-4 h-1 bg-primary rounded-full"></div> 預測值
-        </span>
-      </div>
-    </div>
-    
-    <div className="flex-1 relative">
-      {/* Y 軸標籤 */}
-      <div className="absolute -left-10 top-1/2 -translate-y-1/2 -rotate-90 text-[9px] text-primary/60 font-bold tracking-widest whitespace-nowrap">
-        日照強度 (W/m²)
-      </div>
-      
-      <svg viewBox="0 0 400 150" className="w-full h-full" preserveAspectRatio="none">
-        <line x1="25" y1="10" x2="25" y2="135" stroke="white" strokeOpacity="0.1" />
-        <line x1="25" y1="135" x2="400" y2="135" stroke="white" strokeOpacity="0.1" />
-        {/* 模擬動態路徑 */}
-        <path d="M 25 135 L 80 110 L 160 85 L 260 55 L 380 20" fill="none" stroke="#60a5fa" strokeWidth="1.5" strokeOpacity="0.3" strokeDasharray="4 2" />
-        <path d="M 25 130 L 85 105 L 165 80 L 265 50 L 385 15" fill="none" stroke="#f2cc0d" strokeWidth="2.5" strokeLinecap="round" />
-      </svg>
-      
-      {/* X 軸標籤 */}
-      <div className="absolute -bottom-2 right-0 text-[9px] text-primary/60 font-bold tracking-widest">
-        預估發電量 (kWh)
-      </div>
-    </div>
-  </div>
-);
-
 export default function PredictSolar({ onBack, onNavigateToDashboard, onLogout, onNavigateToSites, onNavigateToTrain, onNavigateToPredict, onNavigateToModelMgmt }) {
   const [file, setFile] = useState(null);
-  const [selectedTrainedModel, setSelectedTrainedModel] = useState('');
+  const [selectedModelId, setSelectedModelId] = useState('');
+  const [trainedModels, setTrainedModels] = useState([]);
   const [isPredicting, setIsPredicting] = useState(false);
-  const [hasResult, setHasResult] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState('');
 
-  const trainedHistory = [
-    { id: 'm1', date: '2025/12/20', model: 'LSTM', accuracy: '96.5%' },
-    { id: 'm2', date: '2025/12/15', model: 'XGBoost', accuracy: '94.2%' },
-    { id: 'm3', date: '2025/11/30', model: 'RandomForest', accuracy: '91.8%' },
-  ];
+  // pagination
+  const PAGE_SIZE = 20;
+  const [page, setPage] = useState(0);
 
-  const handlePredict = () => {
-    if (!file || !selectedTrainedModel) return alert("請上傳資料並選擇訓練紀錄。");
+  // Fetch trained models on mount
+  useEffect(() => {
+    fetch('http://127.0.0.1:8000/train/trained-models')
+      .then(r => r.json())
+      .then(data => { if (Array.isArray(data)) setTrainedModels(data); })
+      .catch(() => { });
+  }, []);
+
+  const handlePredict = async () => {
+    if (!file || !selectedModelId) return alert('請上傳資料並選擇模型');
     setIsPredicting(true);
-    setTimeout(() => {
+    setError('');
+    setResult(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('model_id', selectedModelId);
+
+      const res = await fetch('http://127.0.0.1:8000/train/predict-file', {
+        method: 'POST',
+        body: formData,
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.detail || '預測失敗');
+      setResult(json);
+      setPage(0);
+    } catch (e) {
+      setError(e.message || '預測過程發生錯誤');
+    } finally {
       setIsPredicting(false);
-      setHasResult(true);
-    }, 2000);
+    }
   };
 
   const navProps = { onNavigateToDashboard, onNavigateToTrain, onNavigateToPredict, onNavigateToSites, onNavigateToModelMgmt, onLogout };
+
+  // Pagination helpers
+  const rows = result?.rows || [];
+  const totalPages = Math.ceil(rows.length / PAGE_SIZE);
+  const pagedRows = rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  // Columns to display (original columns + predicted_EAC + error_pct)
+  const displayCols = result ? result.columns : [];
+  // Highlight these columns
+  const highlightCols = new Set(['EAC', 'predicted_EAC', 'error_pct']);
 
   return (
     <div className="min-h-screen w-full bg-background-dark text-white flex flex-col font-sans">
       <Navbar activePage="predict-solar" {...navProps} />
 
-      <main className="flex-1 w-full max-w-7xl mx-auto p-6 py-10 grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
-        
-        {/* 左側：配置區 */}
-        <div className="lg:col-span-4 flex flex-col">
-          <section className="bg-white/[0.02] p-8 rounded-[2rem] border border-white/10 flex-1 flex flex-col shadow-2xl">
-            <h2 className="text-lg font-bold text-white mb-8 flex items-center gap-3 italic">
+      <main className="flex-1 w-full max-w-[1400px] mx-auto p-6 py-10 grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+
+        {/* ── 左側：配置區 ── */}
+        <div className="lg:col-span-3 flex flex-col gap-6">
+          <section className="bg-white/[0.02] p-6 rounded-2xl border border-white/10 shadow-2xl">
+            <h2 className="text-lg font-bold text-white mb-6 flex items-center gap-3 italic">
               <div className="size-8 rounded-lg bg-primary/20 text-primary flex items-center justify-center">
                 <span className="material-symbols-outlined !text-xl">settings_applications</span>
               </div>
-              預測配置中心
+              預測配置
             </h2>
-            
-            <div className="flex-1 space-y-8">
+
+            <div className="space-y-6">
+              {/* 1. Upload */}
               <div>
-                <label className="text-[11px] text-white/30 mb-3 block font-bold uppercase tracking-widest">1. 上傳預測原始資料</label>
-                <div 
-                  className="group border-2 border-dashed border-white/10 rounded-2xl p-8 text-center hover:bg-white/[0.03] hover:border-primary/50 transition-all cursor-pointer"
-                  onClick={() => document.getElementById('fileInput').click()}
+                <label className="text-[11px] text-white/30 mb-2 block font-bold uppercase tracking-widest">1. 上傳預測資料</label>
+                <div
+                  className="group border-2 border-dashed border-white/10 rounded-2xl p-6 text-center hover:bg-white/[0.03] hover:border-primary/50 transition-all cursor-pointer"
+                  onClick={() => document.getElementById('predictFileInput').click()}
                 >
-                  <input type="file" id="fileInput" hidden onChange={(e) => setFile(e.target.files[0])} />
-                  <div className="size-12 rounded-full bg-white/5 mx-auto mb-4 flex items-center justify-center group-hover:bg-primary/10 transition-colors">
-                    <span className="material-symbols-outlined !text-2xl text-white/30 group-hover:text-primary">upload_file</span>
+                  <input type="file" id="predictFileInput" hidden accept=".csv,.xlsx,.xls" onChange={(e) => setFile(e.target.files[0])} />
+                  <div className="size-10 rounded-full bg-white/5 mx-auto mb-3 flex items-center justify-center group-hover:bg-primary/10 transition-colors">
+                    <span className="material-symbols-outlined !text-xl text-white/30 group-hover:text-primary">upload_file</span>
                   </div>
-                  <p className="text-xs font-bold text-white/50 group-hover:text-white transition-colors">{file ? file.name : "CSV / XLSX 檔案"}</p>
+                  <p className="text-xs font-bold text-white/50 group-hover:text-white transition-colors">{file ? file.name : 'CSV / XLSX 檔案'}</p>
                 </div>
               </div>
 
+              {/* 2. Model Select */}
               <div>
-                <label className="text-[11px] text-white/30 mb-3 block font-bold uppercase tracking-widest">2. 選擇歷史訓練模型</label>
-                <select 
-                  value={selectedTrainedModel} 
-                  onChange={(e) => setSelectedTrainedModel(e.target.value)}
-                  className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-4 text-sm text-white focus:ring-2 focus:ring-primary/50 outline-none appearance-none cursor-pointer"
+                <label className="text-[11px] text-white/30 mb-2 block font-bold uppercase tracking-widest">2. 選擇訓練模型</label>
+                <select
+                  value={selectedModelId}
+                  onChange={(e) => setSelectedModelId(e.target.value)}
+                  className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs text-white focus:ring-2 focus:ring-primary/50 outline-none appearance-none cursor-pointer"
                 >
-                  <option value="">請選擇版本...</option>
-                  {trainedHistory.map(h => (
-                    <option key={h.id} value={h.id}>
-                      {h.date} - {h.model} (Acc: {h.accuracy})
+                  <option value="">請選擇模型...</option>
+                  {trainedModels.map(m => (
+                    <option key={m.model_id} value={m.model_id}>
+                      #{m.model_id} {m.model_type} — {m.trained_at ? m.trained_at.slice(0, 16).replace('T', ' ') : ''}
                     </option>
                   ))}
                 </select>
               </div>
             </div>
 
-            <button 
+            <button
               onClick={handlePredict}
-              disabled={isPredicting || !file || !selectedTrainedModel}
-              className="w-full bg-primary text-background-dark py-5 rounded-2xl font-black text-sm hover:scale-[1.02] active:scale-95 transition-all shadow-[0_10px_30px_rgba(242,204,13,0.2)] mt-8"
+              disabled={isPredicting || !file || !selectedModelId}
+              className="w-full bg-primary text-background-dark py-4 rounded-2xl font-black text-sm hover:scale-[1.02] active:scale-95 transition-all shadow-[0_10px_30px_rgba(242,204,13,0.2)] mt-6 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:scale-100"
             >
-              {isPredicting ? "運算執行中..." : "開始執行預測分析"}
+              {isPredicting ? '運算執行中...' : '開始執行預測'}
             </button>
+
+            {error && (
+              <div className="mt-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs">
+                {error}
+              </div>
+            )}
           </section>
+
+          {/* Summary cards — only show after result */}
+          {result && (
+            <section className="space-y-4 animate-fade-in">
+              <div className="grid grid-cols-1 gap-4">
+                <div className="bg-white/5 border border-white/10 p-5 rounded-2xl">
+                  <p className="text-[10px] text-white/40 uppercase font-bold mb-2 tracking-widest">預估發電總量</p>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-2xl font-black font-mono text-white">{result.total_predicted_eac?.toLocaleString() ?? '—'}</span>
+                    <span className="text-xs text-primary font-bold">kWh</span>
+                  </div>
+                </div>
+                <div className="bg-white/5 border border-white/10 p-5 rounded-2xl">
+                  <p className="text-[10px] text-white/40 uppercase font-bold mb-2 tracking-widest">平均誤差</p>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-2xl font-black font-mono text-white">{result.avg_error_pct !== null ? result.avg_error_pct.toFixed(2) : '—'}</span>
+                    <span className="text-xs text-primary font-bold">%</span>
+                  </div>
+                </div>
+                <OverallStatus avgError={result.avg_error_pct} />
+              </div>
+            </section>
+          )}
         </div>
 
-        {/* 右側：結果看板 */}
-        <div className="lg:col-span-8 flex flex-col">
-          <div className={`flex-1 w-full rounded-[2rem] border border-white/10 bg-white/[0.01] p-10 flex flex-col relative transition-all shadow-2xl ${!hasResult && 'items-center justify-center border-dashed opacity-40'}`}>
-            
-            {hasResult ? (
-              <div className="w-full h-full flex flex-col animate-fade-in">
-                <div className="flex justify-between items-start mb-8">
-                   <h2 className="text-2xl font-black italic tracking-tighter">分析預測結果<br/><span className="text-primary text-sm font-bold uppercase tracking-[0.3em]">發電預測即時診斷</span></h2>
-                   <div className="text-right">
-                      <p className="text-[10px] text-white/20 uppercase font-bold tracking-widest">Model Version</p>
-                      <p className="text-xs font-mono text-white/60 italic">{trainedHistory.find(h=>h.id===selectedTrainedModel)?.date} Fixed</p>
-                   </div>
+        {/* ── 右側：資料表格 ── */}
+        <div className="lg:col-span-9 flex flex-col">
+          <div className={`flex-1 w-full rounded-2xl border border-white/10 bg-white/[0.01] p-6 flex flex-col relative transition-all shadow-2xl ${!result && 'items-center justify-center border-dashed opacity-40 min-h-[500px]'}`}>
+            {result ? (
+              <div className="w-full flex flex-col animate-fade-in">
+                {/* Header */}
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                    <span className="material-symbols-outlined !text-base text-primary">table_chart</span>
+                    預測結果 <span className="text-white/30 font-normal ml-2">共 {result.total_rows} 筆</span>
+                  </h2>
+                  <div className="text-[10px] text-white/30">
+                    模型：<span className="text-primary font-bold">{result.model_type}</span>
+                  </div>
                 </div>
 
-                {/* 指標區域 - 三張卡片現在水平對齊且視覺統一 */}
-                <DiagnosticMetrics totalPower="1,428.5" avgIrradiance="682.4" errorValue="4.2" />
+                {/* Table */}
+                <div className="overflow-x-auto rounded-xl border border-white/5">
+                  <table className="w-full text-[10px] text-left whitespace-nowrap">
+                    <thead className="bg-white/5 text-white/40 uppercase sticky top-0 z-10">
+                      <tr>
+                        <th className="px-3 py-2.5 font-bold">#</th>
+                        {displayCols.map(col => (
+                          <th key={col} className={`px-3 py-2.5 font-bold ${highlightCols.has(col) ? 'text-primary' : ''}`}>
+                            {col}
+                          </th>
+                        ))}
+                        <th className="px-3 py-2.5 font-bold text-primary">燈號</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5 font-mono text-white/70">
+                      {pagedRows.map((row, idx) => {
+                        const globalIdx = page * PAGE_SIZE + idx;
+                        const errPct = row.error_pct;
+                        const rowBg = errPct !== null && errPct !== undefined
+                          ? (errPct > 15 ? 'bg-red-500/[0.03]' : errPct > 5 ? 'bg-yellow-500/[0.02]' : '')
+                          : '';
+                        return (
+                          <tr key={globalIdx} className={`hover:bg-white/[0.03] transition-colors ${rowBg}`}>
+                            <td className="px-3 py-2 text-white/20">{globalIdx + 1}</td>
+                            {displayCols.map(col => {
+                              const val = row[col];
+                              let cellClass = 'px-3 py-2';
+                              if (col === 'predicted_EAC') cellClass += ' text-primary font-bold';
+                              else if (col === 'EAC') cellClass += ' text-blue-400';
+                              else if (col === 'error_pct') cellClass += ' hidden'; // shown in light column
+                              return (
+                                <td key={col} className={cellClass}>
+                                  {val === null || val === undefined ? '—' : typeof val === 'number' ? Number(val).toFixed(4) : String(val)}
+                                </td>
+                              );
+                            })}
+                            <td className="px-3 py-2">
+                              <ErrorLight pct={errPct} />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
 
-                <ComparisonChart />
-
-                <p className="mt-8 text-[11px] text-white/20 leading-relaxed italic text-center">
-                  * 本預測結果基於選定之訓練權重。若診斷異常請重新檢查 EAC 資料單位或重新進行模型訓練。
-                </p>
+                {/* Pagination */}
+                {totalPages > 1 && (
+                  <div className="flex items-center justify-between mt-4 text-[10px] text-white/40">
+                    <span>顯示 {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, rows.length)} / {rows.length}</span>
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => setPage(p => Math.max(0, p - 1))}
+                        disabled={page === 0}
+                        className="px-3 py-1 rounded border border-white/10 hover:bg-white/5 disabled:opacity-20 transition-all"
+                      >
+                        上一頁
+                      </button>
+                      {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+                        let pageNum;
+                        if (totalPages <= 7) pageNum = i;
+                        else if (page < 3) pageNum = i;
+                        else if (page > totalPages - 4) pageNum = totalPages - 7 + i;
+                        else pageNum = page - 3 + i;
+                        return (
+                          <button
+                            key={pageNum}
+                            onClick={() => setPage(pageNum)}
+                            className={`px-2.5 py-1 rounded border transition-all ${page === pageNum ? 'border-primary text-primary bg-primary/10' : 'border-white/10 hover:bg-white/5'}`}
+                          >
+                            {pageNum + 1}
+                          </button>
+                        );
+                      })}
+                      <button
+                        onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+                        disabled={page >= totalPages - 1}
+                        className="px-3 py-1 rounded border border-white/10 hover:bg-white/5 disabled:opacity-20 transition-all"
+                      >
+                        下一頁
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="text-center space-y-4">
                 <div className="size-20 rounded-full bg-white/5 mx-auto flex items-center justify-center">
                   <span className="material-symbols-outlined !text-4xl text-white/10">query_stats</span>
                 </div>
-                <p className="text-sm font-bold text-white/20 tracking-widest uppercase">等待配置與預測執行</p>
+                <p className="text-sm font-bold text-white/20 tracking-widest uppercase">上傳資料並選擇模型後即可開始預測</p>
               </div>
             )}
           </div>
         </div>
       </main>
 
-      {/* 底部導航 */}
+      {/* Footer */}
       <div className="p-8 border-t border-white/10 bg-background-dark/95 flex justify-end gap-6 backdrop-blur-xl">
-        <button onClick={onBack} className="text-xs font-bold text-white/30 hover:text-white transition-colors">回模型訓練</button>
+        <button onClick={onBack || onNavigateToDashboard} className="text-xs font-bold text-white/30 hover:text-white transition-colors">回模型訓練</button>
         <button onClick={onNavigateToDashboard} className="px-10 py-3 rounded-xl bg-white/5 border border-white/10 text-white font-bold text-xs hover:bg-white/10 hover:border-white/20 transition-all">返回首頁看板</button>
       </div>
     </div>

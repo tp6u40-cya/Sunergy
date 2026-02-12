@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from sqlalchemy.orm import Session
 import pandas as pd
 import numpy as np
@@ -583,9 +583,8 @@ def run_training(payload: TrainRequest, db: Session = Depends(get_db)):
         df = df.sort_values(time_col).reset_index(drop=True)
         df = _ensure_time_features(df, time_col)
 
-    # build design matrix
-    extra_time_feats = [c for c in ['hour','dayofweek','month','hour_sin','hour_cos'] if c in df.columns]
-    feature_cols = features + [c for c in extra_time_feats if c not in features]
+    # build design matrix — only use explicitly chosen features (default: GI, TM)
+    feature_cols = features
     num_df = df[feature_cols].select_dtypes(include=[np.number])
     if num_df.isna().any().any():
         raise HTTPException(status_code=400, detail="numeric features contain NaN; cleaned data should not have missing values in features")
@@ -956,4 +955,201 @@ def predict(payload: PredictRequest, db: Session = Depends(get_db)):
         "n": int(len(y_pred)),
         "target": target_col,
         "pred": [None if (isinstance(v, float) and np.isnan(v)) else v for v in y_pred.tolist()],
+    })
+
+
+# ---------------------------------------------------------------------------
+# GET /train/trained-models  — list all trained model records from DB
+# ---------------------------------------------------------------------------
+@router.get("/trained-models")
+def list_trained_models(db: Session = Depends(get_db)):
+    rows = db.query(TrainedModel).order_by(TrainedModel.trained_at.desc()).all()
+    out = []
+    for r in rows:
+        out.append({
+            "model_id": r.model_id,
+            "model_type": r.model_type,
+            "parameters": r.parameters,
+            "file_path": r.file_path,
+            "trained_at": r.trained_at.isoformat() if r.trained_at else None,
+            "data_id": r.data_id,
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# POST /train/predict-file  — upload csv/xlsx + model_id → predict EAC
+# ---------------------------------------------------------------------------
+@router.post("/predict-file")
+async def predict_file(
+    file: UploadFile = File(...),
+    model_id: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    # 1. lookup trained model
+    tm = db.query(TrainedModel).filter(TrainedModel.model_id == model_id).first()
+    if not tm:
+        raise HTTPException(status_code=404, detail="trained model not found")
+
+    artifact_path = Path("uploads") / tm.file_path
+    if not artifact_path.exists():
+        raise HTTPException(status_code=404, detail=f"artifact file missing: {tm.file_path}")
+
+    meta_path = artifact_path.with_suffix(".meta.json")
+    if not meta_path.exists():
+        raise HTTPException(status_code=400, detail="missing .meta.json sidecar for this model")
+
+    import json as _json
+    with open(meta_path, "r", encoding="utf-8") as fh:
+        meta = _json.load(fh)
+    feature_cols = meta.get("feature_cols_used") or []
+    target_col = meta.get("target") or "EAC"
+
+    # 2. read uploaded file
+    import io
+    contents = await file.read()
+    fname = file.filename or ""
+    if fname.lower().endswith(".xlsx") or fname.lower().endswith(".xls"):
+        try:
+            import openpyxl  # noqa: F401
+            df = pd.read_excel(io.BytesIO(contents))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"failed to read Excel file: {e}")
+    else:
+        try:
+            df = pd.read_csv(io.BytesIO(contents))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"failed to read CSV file: {e}")
+
+    if df.empty:
+        raise HTTPException(status_code=400, detail="uploaded file has no data")
+
+    # 3. derive time features if needed (same logic as training)
+    time_col = None
+    for c in df.columns:
+        # already a datetime column (common with Excel files)
+        if pd.api.types.is_datetime64_any_dtype(df[c]):
+            time_col = c
+            break
+        # string column that looks like datetime
+        if df[c].dtype == object:
+            parsed = pd.to_datetime(df[c], errors="coerce")
+            if parsed.notna().sum() > len(df) * 0.5:
+                time_col = c
+                break
+    df = _ensure_time_features(df, time_col)
+
+    # Also map common column aliases to required feature names
+    alias_map = {
+        'hour': ['theHour', 'TheHour', 'THEHOUR', 'Hour'],
+        'month': ['theDate', 'TheDate', 'THEDATE'],
+    }
+    for feat, aliases in alias_map.items():
+        if feat in feature_cols and feat not in df.columns:
+            for alias in aliases:
+                if alias in df.columns:
+                    if feat == 'month':
+                        # derive month from date column
+                        parsed = pd.to_datetime(df[alias], errors='coerce')
+                        df['month'] = parsed.dt.month
+                    else:
+                        df[feat] = pd.to_numeric(df[alias], errors='coerce')
+                    break
+
+    # 4. validate feature columns
+    missing = [c for c in feature_cols if c not in df.columns]
+    if missing:
+        raise HTTPException(status_code=400,
+                            detail=f"uploaded file is missing required columns: {', '.join(missing)}. "
+                                   f"Required: {feature_cols}")
+
+    X = df[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0).values
+
+    # 5. load model & predict
+    y_pred: np.ndarray
+    if artifact_path.suffix == ".json":
+        if not HAS_XGBOOST:
+            raise HTTPException(status_code=500, detail="xgboost not available")
+        booster = xgb.XGBRegressor()
+        booster.load_model(str(artifact_path))
+        y_pred = booster.predict(X)
+    elif artifact_path.suffix == ".pt":
+        if not HAS_TORCH:
+            raise HTTPException(status_code=500, detail="PyTorch not available")
+        checkpoint = torch.load(str(artifact_path), map_location="cpu")
+        input_size = checkpoint["input_size"]
+        hidden_size = checkpoint["hidden_size"]
+        num_layers = checkpoint["num_layers"]
+        dropout = checkpoint["dropout"]
+        lookback = checkpoint["lookback"]
+        scaler_mean = np.array(checkpoint["scaler_mean"])
+        scaler_std = np.array(checkpoint["scaler_std"])
+
+        class LSTMRegressor(nn.Module):
+            def __init__(self, input_size, hidden_size, num_layers, dropout):
+                super().__init__()
+                self.lstm = nn.LSTM(input_size, hidden_size, num_layers=num_layers,
+                                   batch_first=True, dropout=dropout if num_layers > 1 else 0.0)
+                self.fc = nn.Linear(hidden_size, 1)
+            def forward(self, x):
+                out, _ = self.lstm(x)
+                return self.fc(out[:, -1, :]).squeeze(-1)
+
+        model = LSTMRegressor(input_size, hidden_size, num_layers, dropout)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.eval()
+        X_scaled = ((X - scaler_mean) / scaler_std).astype(np.float32)
+        if len(X_scaled) <= lookback:
+            raise HTTPException(status_code=400,
+                                detail=f"Not enough rows for LSTM (need > {lookback})")
+        X_seq = np.array([X_scaled[i - lookback:i] for i in range(lookback, len(X_scaled))],
+                         dtype=np.float32)
+        with torch.no_grad():
+            preds = model(torch.from_numpy(X_seq)).numpy()
+        y_pred = np.full(len(X), np.nan)
+        y_pred[lookback:] = preds
+    else:
+        import joblib as _joblib
+        model = _joblib.load(artifact_path)
+        y_pred = model.predict(X)
+
+    # 6. build response: every row from uploaded file + predicted_EAC + error %
+    actual_eac = df[target_col].values if target_col in df.columns else None
+    rows_out = []
+    for i, row in df.iterrows():
+        r = row.to_dict()
+        pred_val = None if (isinstance(y_pred[i], float) and np.isnan(y_pred[i])) else round(float(y_pred[i]), 4)
+        r["predicted_EAC"] = pred_val
+        if actual_eac is not None and pred_val is not None:
+            act = float(actual_eac[i]) if not pd.isna(actual_eac[i]) else None
+            if act is not None and act != 0:
+                r["error_pct"] = round(abs(pred_val - act) / abs(act) * 100, 2)
+            elif act == 0 and pred_val == 0:
+                r["error_pct"] = 0.0
+            else:
+                r["error_pct"] = None
+        else:
+            r["error_pct"] = None
+        rows_out.append(r)
+
+    # summary stats
+    errors = [r["error_pct"] for r in rows_out if r["error_pct"] is not None]
+    avg_error = round(sum(errors) / len(errors), 2) if errors else None
+    total_pred = round(sum(r["predicted_EAC"] for r in rows_out if r["predicted_EAC"] is not None), 2)
+
+    # Remove time-derived columns from output (they are internal features only)
+    _hide = {'hour', 'dayofweek', 'month', 'hour_sin', 'hour_cos'}
+    display_cols = [c for c in df.columns if c not in _hide]
+    for r in rows_out:
+        for h in _hide:
+            r.pop(h, None)
+
+    return _to_native({
+        "model_type": tm.model_type,
+        "model_id": tm.model_id,
+        "total_rows": len(rows_out),
+        "total_predicted_eac": total_pred,
+        "avg_error_pct": avg_error,
+        "columns": display_cols + ["predicted_EAC", "error_pct"],
+        "rows": rows_out,
     })
