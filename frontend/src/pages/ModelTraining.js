@@ -99,12 +99,15 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
     XGB_alpha_s: 0.0, XGB_alpha_e: 1.0,
     // SVR
     SVR_c_s: 1, SVR_c_e: 50,
+    SVR_epsilon_s: 0.01, SVR_epsilon_e: 1.0,
+    SVR_gamma: 'scale',
     // RandomForest
     RF_trees_s: 50, RF_trees_e: 300,
     RF_depth_s: 3, RF_depth_e: 12,
   });
-  // Cap for XGB grid combinations
+  // Cap for XGB / LSTM grid combinations
   const [xgbMaxComb, setXgbMaxComb] = useState(100);
+  const [lstmMaxComb, setLstmMaxComb] = useState(50);
   const [activeChartLines, setActiveChartLines] = useState({ LSTM: true, XGBoost: true, SVR: true, RandomForest: true });
   const [isTraining, setIsTraining] = useState(false);
   const [isTrained, setIsTrained] = useState(false);
@@ -135,62 +138,40 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
     if (!dataId) return alert('找不到清洗後的資料來源');
 
     const params = {};
-    if (strategy === 'manual') {
-      if (selectedModels.includes('XGBoost')) params['XGBoost'] = {
-        n_estimators: Number(paramIntervals.XGB_trees_e),
-        max_depth: Number(paramIntervals.XGB_depth_e),
-        learning_rate: Number(paramIntervals.XGB_lr_e),
-        subsample: Number(paramIntervals.XGB_subsample_e),
-        colsample_bytree: Number(paramIntervals.XGB_colsample_e),
-        min_child_weight: Number(paramIntervals.XGB_min_child_e),
-        reg_lambda: Number(paramIntervals.XGB_lambda_e),
-        reg_alpha: Number(paramIntervals.XGB_alpha_e),
-      };
-      if (selectedModels.includes('RandomForest')) params['RandomForest'] = { n_estimators: Number(paramIntervals.RF_trees_e), max_depth: Number(paramIntervals.RF_depth_e) };
-    } else {
-      if (selectedModels.includes('XGBoost')) params['XGBoost'] = {
-        n_estimators: { start: paramIntervals.XGB_trees_s, end: paramIntervals.XGB_trees_e, step: 100 },
-        max_depth: { start: paramIntervals.XGB_depth_s, end: paramIntervals.XGB_depth_e, step: 1 },
-        learning_rate: { start: Number(paramIntervals.XGB_lr_s), end: Number(paramIntervals.XGB_lr_e), step: 0.01 },
-        subsample: { start: Number(paramIntervals.XGB_subsample_s), end: Number(paramIntervals.XGB_subsample_e), step: 0.05 },
-        colsample_bytree: { start: Number(paramIntervals.XGB_colsample_s), end: Number(paramIntervals.XGB_colsample_e), step: 0.05 },
-        min_child_weight: { start: Number(paramIntervals.XGB_min_child_s), end: Number(paramIntervals.XGB_min_child_e), step: 1 },
-        reg_lambda: { start: Number(paramIntervals.XGB_lambda_s), end: Number(paramIntervals.XGB_lambda_e), step: 0.1 },
-        reg_alpha: { start: Number(paramIntervals.XGB_alpha_s), end: Number(paramIntervals.XGB_alpha_e), step: 0.1 },
-        _max_combinations: Number(xgbMaxComb),
-      };
-      if (selectedModels.includes('RandomForest')) params['RandomForest'] = { n_estimators: { start: paramIntervals.RF_trees_s, end: paramIntervals.RF_trees_e, step: 50 }, max_depth: { start: paramIntervals.RF_depth_s, end: paramIntervals.RF_depth_e, step: 1 } };
-    }
+    if (selectedModels.includes('XGBoost')) params['XGBoost'] = {
+      n_estimators: { start: paramIntervals.XGB_trees_s, end: paramIntervals.XGB_trees_e, step: 100 },
+      max_depth: { start: paramIntervals.XGB_depth_s, end: paramIntervals.XGB_depth_e, step: 1 },
+      learning_rate: { start: Number(paramIntervals.XGB_lr_s), end: Number(paramIntervals.XGB_lr_e), step: 0.01 },
+      subsample: { start: Number(paramIntervals.XGB_subsample_s), end: Number(paramIntervals.XGB_subsample_e), step: 0.05 },
+      colsample_bytree: { start: Number(paramIntervals.XGB_colsample_s), end: Number(paramIntervals.XGB_colsample_e), step: 0.05 },
+      min_child_weight: { start: Number(paramIntervals.XGB_min_child_s), end: Number(paramIntervals.XGB_min_child_e), step: 1 },
+      reg_lambda: { start: Number(paramIntervals.XGB_lambda_s), end: Number(paramIntervals.XGB_lambda_e), step: 0.1 },
+      reg_alpha: { start: Number(paramIntervals.XGB_alpha_s), end: Number(paramIntervals.XGB_alpha_e), step: 0.1 },
+      _max_combinations: Number(xgbMaxComb),
+    };
+    if (selectedModels.includes('RandomForest')) params['RandomForest'] = {
+      n_estimators: { start: paramIntervals.RF_trees_s, end: paramIntervals.RF_trees_e, step: 50 },
+      max_depth: { start: paramIntervals.RF_depth_s, end: paramIntervals.RF_depth_e, step: 1 },
+    };
     if (selectedModels.includes('SVR')) {
-      if (strategy === 'manual') {
-        params['SVR'] = { C: Number(paramIntervals.SVR_c_e) };
-      } else {
-        const step = Math.max(1, Math.floor((paramIntervals.SVR_c_e - paramIntervals.SVR_c_s) / 5) || 1);
-        params['SVR'] = { C: { start: paramIntervals.SVR_c_s, end: paramIntervals.SVR_c_e, step } };
-      }
+      const cStep = Math.max(1, Math.floor((paramIntervals.SVR_c_e - paramIntervals.SVR_c_s) / 5) || 1);
+      params['SVR'] = {
+        C: { start: paramIntervals.SVR_c_s, end: paramIntervals.SVR_c_e, step: cStep },
+        epsilon: { start: Number(paramIntervals.SVR_epsilon_s), end: Number(paramIntervals.SVR_epsilon_e), step: 0.05 },
+        gamma: { values: ['scale', 'auto'] },
+      };
     }
     if (selectedModels.includes('LSTM')) {
-      if (strategy === 'manual') {
-        params['LSTM'] = {
-          epochs: Number(paramIntervals.LSTM_epochs_e),
-          lookback: Number(paramIntervals.LSTM_lookback_e),
-          hidden_size: Number(paramIntervals.LSTM_hidden_e),
-          num_layers: Number(paramIntervals.LSTM_num_layers_e),
-          dropout: Number(paramIntervals.LSTM_dropout_e),
-          lr: Number(paramIntervals.LSTM_lr_e),
-          batch_size: Number(paramIntervals.LSTM_batch_size_e)
-        };
-      } else {
-        params['LSTM'] = {
-          lookback: { start: paramIntervals.LSTM_lookback_s, end: paramIntervals.LSTM_lookback_e, step: 12 },
-          hidden_size: { start: paramIntervals.LSTM_hidden_s, end: paramIntervals.LSTM_hidden_e, step: 32 },
-          epochs: { start: paramIntervals.LSTM_epochs_s, end: paramIntervals.LSTM_epochs_e, step: 10 },
-          num_layers: { start: paramIntervals.LSTM_num_layers_s, end: paramIntervals.LSTM_num_layers_e, step: 1 },
-          dropout: { start: paramIntervals.LSTM_dropout_s, end: paramIntervals.LSTM_dropout_e, step: 0.1 },
-          lr: { start: paramIntervals.LSTM_lr_s, end: paramIntervals.LSTM_lr_e, step: 0.001 },
-          batch_size: { start: paramIntervals.LSTM_batch_size_s, end: paramIntervals.LSTM_batch_size_e, step: 32 }
-        };
-      }
+      params['LSTM'] = {
+        lookback: { start: paramIntervals.LSTM_lookback_s, end: paramIntervals.LSTM_lookback_e, step: 12 },
+        hidden_size: { start: paramIntervals.LSTM_hidden_s, end: paramIntervals.LSTM_hidden_e, step: 32 },
+        epochs: { start: paramIntervals.LSTM_epochs_s, end: paramIntervals.LSTM_epochs_e, step: 10 },
+        num_layers: { start: paramIntervals.LSTM_num_layers_s, end: paramIntervals.LSTM_num_layers_e, step: 1 },
+        dropout: { start: paramIntervals.LSTM_dropout_s, end: paramIntervals.LSTM_dropout_e, step: 0.1 },
+        lr: { start: paramIntervals.LSTM_lr_s, end: paramIntervals.LSTM_lr_e, step: 0.001 },
+        batch_size: { start: paramIntervals.LSTM_batch_size_s, end: paramIntervals.LSTM_batch_size_e, step: 32 },
+        _max_combinations: Number(lstmMaxComb)
+      };
     }
 
     // Add _trials parameter for Bayesian optimization strategy
@@ -321,7 +302,7 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
             {/* 策略選擇 */}
             <div className="mb-4 flex items-center gap-2 text-[10px]">
               <span className="text-white/50">策略選擇</span>
-              {["manual", "grid", "bayes"].map((sg) => (
+              {["grid", "bayes"].map((sg) => (
                 <label key={sg} className={["px-2", "py-1", "rounded", "border", "cursor-pointer", (strategy === sg ? "border-primary text-primary" : "border-white/10 text-white/50")].join(' ')}>
                   <input type="radio" name="strategy" value={sg} checked={strategy === sg} onChange={() => setStrategy(sg)} className="hidden" />
                   {sg.toUpperCase()}
@@ -400,8 +381,26 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
                       })()}
                     </>
                   )}
-                  {id === 'SVR' && <IntervalSlider label="C (懲罰參數區間)" min={0.1} max={100} start={paramIntervals.SVR_c_s} end={paramIntervals.SVR_c_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, SVR_c_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, SVR_c_e: v })} />}
-                  {id === 'RandomForest' && <IntervalSlider label="n_estimators (森林規模)" min={10} max={1000} start={paramIntervals.RF_trees_s} end={paramIntervals.RF_trees_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, RF_trees_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, RF_trees_e: v })} />}
+                  {id === 'SVR' && (
+                    <>
+                      <IntervalSlider label="C (懲罰參數)" min={0.1} max={100} step={0.1} start={paramIntervals.SVR_c_s} end={paramIntervals.SVR_c_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, SVR_c_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, SVR_c_e: v })} />
+                      <IntervalSlider label="epsilon (容忍度)" min={0.001} max={2.0} step={0.01} start={paramIntervals.SVR_epsilon_s} end={paramIntervals.SVR_epsilon_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, SVR_epsilon_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, SVR_epsilon_e: v })} />
+                      <div className="mb-6">
+                        <label className="text-xs font-bold text-primary mb-2 block">gamma (核函數係數)</label>
+                        <div className="flex gap-2">
+                          {['scale', 'auto'].map(g => (
+                            <button key={g} onClick={() => setParamIntervals({ ...paramIntervals, SVR_gamma: g })} className={`px-3 py-1.5 rounded border text-[10px] font-bold transition-all ${paramIntervals.SVR_gamma === g ? 'border-primary bg-primary/10 text-primary' : 'border-white/10 bg-white/5 text-white/40'}`}>{g}</button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                  {id === 'RandomForest' && (
+                    <>
+                      <IntervalSlider label="n_estimators (森林規模)" min={10} max={1000} start={paramIntervals.RF_trees_s} end={paramIntervals.RF_trees_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, RF_trees_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, RF_trees_e: v })} />
+                      <IntervalSlider label="max_depth (最大深度)" min={1} max={30} step={1} start={paramIntervals.RF_depth_s} end={paramIntervals.RF_depth_e} onStartChange={(v) => setParamIntervals({ ...paramIntervals, RF_depth_s: v })} onEndChange={(v) => setParamIntervals({ ...paramIntervals, RF_depth_e: v })} />
+                    </>
+                  )}
                 </div>
               ))}
               {selectedModels.length === 0 && <p className="text-center text-[10px] text-white/20 italic py-4">請先在步驟 2 選擇模型</p>}
@@ -459,17 +458,49 @@ export default function ModelTraining({ onBack, onNext, onNavigateToPredict, onL
                     </thead>
                     <tbody className="divide-y divide-white/5 font-mono text-white/80">
                       {Object.values(trainingResults).map(res => (
-                        <tr key={res.id} className="hover:bg-white/5 transition-colors">
-                          <td className="px-4 py-4 font-bold text-primary font-sans">{res.id}</td>
-                          <td className="px-4 py-4"><StatusLight wmape={res.wmape} /></td>
-                          <td className="px-4 py-4 text-right text-green-400">{res.r2 !== undefined && res.r2 !== null ? Number(res.r2).toFixed(3) : '-'}</td>
-                          <td className="px-4 py-4 text-right">{res.rmse !== undefined && res.rmse !== null ? Number(res.rmse).toFixed(3) : '-'}</td>
-                          <td className="px-4 py-4 text-right">{res.mae !== undefined && res.mae !== null ? Number(res.mae).toFixed(3) : '-'}</td>
-                          <td className="px-4 py-4 text-right text-yellow-500/80">{res.wmape !== undefined && res.wmape !== null ? Number(res.wmape).toFixed(4) : '-'}</td>
-                        </tr>
+                        res.status === 'error' ? (
+                          <tr key={res.id} className="hover:bg-white/5 transition-colors bg-red-500/5">
+                            <td className="px-4 py-4 font-bold text-red-400 font-sans">{res.id}</td>
+                            <td colSpan={5} className="px-4 py-4 text-red-400">
+                              <div className="flex items-center gap-2">
+                                <span className="material-symbols-outlined !text-sm">error</span>
+                                {res.error || '訓練失敗（未知錯誤）'}
+                              </div>
+                            </td>
+                          </tr>
+                        ) : (
+                          <tr key={res.id} className="hover:bg-white/5 transition-colors">
+                            <td className="px-4 py-4 font-bold text-primary font-sans">{res.id}</td>
+                            <td className="px-4 py-4"><StatusLight wmape={res.wmape} /></td>
+                            <td className="px-4 py-4 text-right text-green-400">{res.r2 !== undefined && res.r2 !== null ? Number(res.r2).toFixed(3) : '-'}</td>
+                            <td className="px-4 py-4 text-right">{res.rmse !== undefined && res.rmse !== null ? Number(res.rmse).toFixed(3) : '-'}</td>
+                            <td className="px-4 py-4 text-right">{res.mae !== undefined && res.mae !== null ? Number(res.mae).toFixed(3) : '-'}</td>
+                            <td className="px-4 py-4 text-right text-yellow-500/80">{res.wmape !== undefined && res.wmape !== null ? Number(res.wmape).toFixed(4) : '-'}</td>
+                          </tr>
+                        )
                       ))}
                     </tbody>
                   </table>
+                </div>
+
+                {/* Best Params 展示 */}
+                <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {Object.values(trainingResults).filter(r => r.status === 'ok' && r.best_params && Object.keys(r.best_params).length > 0).map(res => (
+                    <div key={res.id} className="p-4 rounded-xl border border-white/10 bg-white/[0.02]">
+                      <h4 className="text-xs font-bold text-primary mb-3 flex items-center gap-2">
+                        <span className="material-symbols-outlined !text-sm">tune</span>
+                        {res.id} 最佳參數
+                      </h4>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                        {Object.entries(res.best_params).filter(([k]) => !k.startsWith('_')).map(([key, val]) => (
+                          <div key={key} className="flex justify-between text-[10px] py-1 border-b border-white/5">
+                            <span className="text-white/50">{key}</span>
+                            <span className="text-white/90 font-mono">{typeof val === 'number' ? (Number.isInteger(val) ? val : val.toFixed(4)) : String(val)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
             ) : (

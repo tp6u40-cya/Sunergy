@@ -380,28 +380,25 @@ def _train_single_model(model_id: str, X_train, y_train, X_test, y_test, strateg
             return {"best": {"params": best_p, "r2": r2, "rmse": rmse, "mae": mae, "wmape": wmape}, "trials": []}
 
     candidates = [{}]
-    if strategy == "manual":
-        candidates = [param_spec or {}]
-    elif strategy == "grid":
+    if strategy == "grid":
         candidates = build_grid(param_spec or {})
-        # XGBoost-only: cap number of combinations if requested
-        if model_id == "XGBoost":
-            try:
-                max_n = int((param_spec or {}).get('_max_combinations', 0) or 0)
-            except Exception:
-                max_n = 0
-            if max_n > 0 and len(candidates) > max_n:
-                # pick evenly spaced indices to cover the space
-                idx = np.linspace(0, len(candidates) - 1, num=max_n)
-                idx = [int(round(i)) for i in idx]
-                # ensure unique and sorted
-                seen = set()
-                selected = []
-                for i in idx:
-                    if i not in seen:
-                        selected.append(i)
-                        seen.add(i)
-                candidates = [candidates[i] for i in selected]
+        # Cap number of combinations if requested (applies to all models)
+        try:
+            max_n = int((param_spec or {}).get('_max_combinations', 0) or 0)
+        except Exception:
+            max_n = 0
+        if max_n > 0 and len(candidates) > max_n:
+            # pick evenly spaced indices to cover the space
+            idx = np.linspace(0, len(candidates) - 1, num=max_n)
+            idx = [int(round(i)) for i in idx]
+            # ensure unique and sorted
+            seen = set()
+            selected = []
+            for i in idx:
+                if i not in seen:
+                    selected.append(i)
+                    seen.add(i)
+            candidates = [candidates[i] for i in selected]
 
     for params in candidates:
         if model_id == "SVR":
